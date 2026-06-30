@@ -120,6 +120,7 @@ class Stack(DefaultCameraEnv):
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
+        self._color_table()
 
         if self.item_type not in ["cube", "can"]:
             raise NotImplementedError(f"Unknown item_type: {self.item_type}")
@@ -160,7 +161,7 @@ class Stack(DefaultCameraEnv):
 
         # ItemA colors (red)
         colorsA = np.zeros((self.num_envs, 4))
-        colorsA[:, 0] = 1  # Red
+        colorsA[:, 0:3] = [0.91, 1.0, 0.94]
         colorsA[:, 3] = 1  # Alpha
 
         itemsA = []

@@ -54,9 +54,9 @@ class RandomizationConfig:
     # === Static settings (not affected by domain_randomization flag) ===
     initial_qpos_noise_scale: float = 0.02
     """Noise scale for initial robot joint positions."""
-    apply_overlay: bool = True
+    apply_overlay: bool = False
     """Whether to apply background overlay (greenscreen). If False, returns raw simulation images."""
-    rgb_overlay_path: Optional[str] = os.path.join(os.path.dirname(__file__), "black_overlay.png")
+    rgb_overlay_path: Optional[str] = os.path.join(os.path.dirname(__file__), "blue_overlay.png")
     """Path to background image. If None and apply_overlay=True, uses black background."""
 
     # === Common randomization settings (affected by domain_randomization flag) ===
@@ -161,6 +161,27 @@ class BaseRandomEnv(BaseEnv):
         """Initialize scene. Subclasses should call super()._load_scene() first."""
         self._objects_to_remove_from_greenscreen = []
 
+    def _color_table(self):
+        """Color the 3D table blue if apply_overlay is False to match the backdrop color."""
+        # This colors the 3D table for the 3rd person POV even when the greenscreen is active
+        if not hasattr(self, "table_scene"):
+            return
+        import sapien
+        blue_color = [0.145, 0.624, 0.839, 1.0]
+        for e in self.table_scene.table._objs:
+            rc = e.find_component_by_type(sapien.render.RenderBodyComponent)
+            if rc:
+                for shape in rc.render_shapes:
+                    for part in shape.parts:
+                        mat = part.material
+                        mat.set_base_color_texture(None)
+                        mat.set_normal_texture(None)
+                        mat.set_metallic_texture(None)
+                        mat.set_roughness_texture(None)
+                        mat.set_base_color(blue_color)
+                        mat.set_roughness(0.9)
+                        mat.set_metallic(0.0)
+
     def _load_lighting(self, options: dict):
         """Load scene lighting with optional randomization."""
         if self.domain_randomization and self.domain_randomization_config.randomize_lighting:
@@ -171,7 +192,7 @@ class BaseRandomEnv(BaseEnv):
             self.scene.set_ambient_light([0.3, 0.3, 0.3])
 
         self.scene.add_directional_light(
-            [1, 1, -1], [1, 1, 1], shadow=False, shadow_scale=5, shadow_map_size=2048
+            [1, 1, -1], [1, 1, 1], shadow=True, shadow_scale=5, shadow_map_size=2048
         )
         self.scene.add_directional_light([0, 0, -1], [1, 1, 1])
 
@@ -494,9 +515,9 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link
-    WRIST_CAMERA_BASE_POS = (-0.0049, 0.0498, -0.0591)
-    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-90), np.deg2rad(91), np.deg2rad(-35.31))  # radians (roll, pitch, yaw)
-    WRIST_CAMERA_FOV = np.deg2rad(71)  # 71 degrees
+    WRIST_CAMERA_BASE_POS = (-0.0110, 0.0520, -0.0520)
+    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))  # radians (roll, pitch, yaw)
+    WRIST_CAMERA_FOV = np.deg2rad(71.0)  # 71 degrees
 
     def __init__(
         self,

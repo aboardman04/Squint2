@@ -122,13 +122,14 @@ class Place(DefaultCameraEnv):
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
+        self._color_table()
 
         if self.item_type not in ["cube", "can"]:
             raise NotImplementedError(f"Unknown item_type: {self.item_type}")
 
         # Default values
         colors = np.zeros((self.num_envs, 3))
-        colors[:, 0] = 1  # Red
+        colors[:, :] = [0.91, 1.0, 0.94]
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
         densities = np.ones(self.num_envs) * (cfg.item_density_range[0] + cfg.item_density_range[1]) / 2
@@ -252,7 +253,7 @@ class Place(DefaultCameraEnv):
         self.add_to_state_dict_registry(self.item)
 
         # Build bins (per-env for domain randomization)
-        bin_color = sapien.render.RenderMaterial(base_color=[1.0, 1.0, 1.0, 1.0])
+        bin_color = sapien.render.RenderMaterial(base_color=[0.996, 0.918, 0.243, 1.0])
         thickness = 0.005
         self.bin_thickness = thickness
 

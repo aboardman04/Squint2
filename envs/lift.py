@@ -118,6 +118,7 @@ class Lift(DefaultCameraEnv):
         # where the 0, 0, 0 position is the center of the table
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
+        self._color_table()
 
 
         if self.item_type not in ["cube", "can"]:
@@ -125,7 +126,7 @@ class Lift(DefaultCameraEnv):
 
         # some default values for item geometry
         colors = np.zeros((self.num_envs, 3))
-        colors[:, 0] = 1
+        colors[:, :] = [0.91, 1.0, 0.94]
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
         densities = np.ones(self.num_envs) * (cfg.item_density_range[0] + cfg.item_density_range[1]) / 2

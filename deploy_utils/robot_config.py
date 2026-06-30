@@ -18,7 +18,7 @@ def create_real_robot() -> Robot:
         port="/dev/ttyACM0",  # CHANGE THIS: your robot's serial port
         use_degrees=True,
         cameras={"base_camera": OpenCVCameraConfig(
-            index_or_path="/dev/video0",  # CHANGE THIS: your webcam device path
+            index_or_path="/dev/video4",  # CHANGE THIS: your webcam device path
             fps=30,
             width=640,
             height=480
@@ -29,8 +29,8 @@ def create_real_robot() -> Robot:
         #     width=640,
         #     height=480
         # )},
-        id="so101_follower_arm", # CHANGE THIS: your calibration file name
-        calibration_dir=Path(__file__).parent,  # CHANGE THIS: path to calibration file directory
+        id="mind_blowing_mandy", # CHANGE THIS: your calibration file name
+        calibration_dir=Path("/home/aboardman/.cache/huggingface/lerobot/calibration/robots/so_follower/mind_blowing_mandy.json").parent,  # CHANGE THIS: path to calibration file directory
     )
 
     return make_robot_from_config(robot_config)

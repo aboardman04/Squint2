@@ -3,7 +3,7 @@
 
   <!-- Materials -->
   <material name="3d_printed">
-    <color rgba="0.95 0.95 0.95 1.0"/>
+    <color rgba="0.1 0.1 0.1 1.0"/>
   </material>
   <material name="sts3215">
     <color rgba="0.1 0.1 0.1 1.0"/>
