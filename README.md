@@ -52,13 +52,18 @@ conda activate squint
 
 ## 🎮 Simulation Training
 
+## Configure Sim Environment
+Optimally adjust 
+
 ### Basic Training
 
 Train an agent on the LiftCube task:
 
 ```bash
-python train_squint.py --env_id=SO101LiftCube-v1
+python train_squint.py --env_id=SO101LiftCube-v1n--exp_name="file_name" --track --num_envs=128
 ```
+This allows you to change the file name the policy is saved to, track it in wandb, and it reduces the number of environments being trained at once making it take longer to train but be able to train on less powerful GPUs. To use '--track' make sure you are logged into wandb in your terminal. The env_id is specific to the task you are training.
+Using '--checkpoint=runs/file_name/ckpt.pt' allows you to continue training an existing policy. 
 
 ### Training with Weights & Biases Logging
 
