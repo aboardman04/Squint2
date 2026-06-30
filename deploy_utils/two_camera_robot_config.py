@@ -17,12 +17,20 @@ def create_real_robot() -> Robot:
     robot_config = SO101FollowerConfig(
         port="/dev/ttyACM0",  # CHANGE THIS: your robot's serial port
         use_degrees=True,
-        cameras={"base_camera": OpenCVCameraConfig(
-            index_or_path="/dev/video5",  # CHANGE THIS: your webcam device path
-            fps=30,
-            width=640,
-            height=480
-        )},
+        cameras={
+            "base_camera": OpenCVCameraConfig(
+                index_or_path="/dev/video4",  # CHANGE THIS: your wrist webcam device path
+                fps=30,
+                width=640,
+                height=480
+            ),
+            "overhead_camera": OpenCVCameraConfig(
+                index_or_path="/dev/video2",  # CHANGE THIS: your overhead webcam device path
+                fps=30,
+                width=640,
+                height=480
+            )
+        },
         # cameras={"base_camera": RealSenseCameraConfig(
         #     serial_number_or_name="053645021390",  
         #     fps=30,
