@@ -34,6 +34,14 @@ import sapien
 import torch
 from sapien.render import RenderBodyComponent
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
@@ -511,14 +519,14 @@ class TwoCameraEnv(BaseRandomEnv):
     """Environment with wrist camera and overhead camera."""
 
     # Base pose relative to gripper_link
-    WRIST_CAMERA_BASE_POS = (-0.0110, 0.0520, -0.0520)
-    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))  # radians (roll, pitch, yaw)
-    WRIST_CAMERA_FOV = np.deg2rad(71.0)  # 71 degrees
+    WRIST_CAMERA_BASE_POS = env_cal.WRIST_CAMERA_BASE_POS if env_cal else (-0.0110, 0.0520, -0.0520)
+    WRIST_CAMERA_BASE_ROT_RAD = env_cal.WRIST_CAMERA_BASE_ROT_RAD if env_cal else (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))
+    WRIST_CAMERA_FOV = env_cal.WRIST_CAMERA_FOV if env_cal else np.deg2rad(71.0)
 
     # Overhead camera global pose (Tuned via tune_2camera.py)
-    OVERHEAD_CAMERA_BASE_POS = [0.6, 0.0, 0.4]
-    OVERHEAD_CAMERA_BASE_ROT_RAD = (np.deg2rad(0), np.deg2rad(45), np.deg2rad(180)) # roll, pitch, yaw
-    OVERHEAD_CAMERA_FOV = np.deg2rad(60.0)
+    OVERHEAD_CAMERA_BASE_POS = env_cal.OVERHEAD_CAMERA_BASE_POS if env_cal else [0.6, 0.0, 0.4]
+    OVERHEAD_CAMERA_BASE_ROT_RAD = env_cal.OVERHEAD_CAMERA_BASE_ROT_RAD if env_cal else (np.deg2rad(0), np.deg2rad(45), np.deg2rad(180))
+    OVERHEAD_CAMERA_FOV = env_cal.OVERHEAD_CAMERA_FOV if env_cal else np.deg2rad(60.0)
 
     def __init__(
         self,

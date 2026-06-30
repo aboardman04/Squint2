@@ -76,6 +76,8 @@ class Args:
     """Directory to save episode recordings. If None, no recording."""
     traj_dir: str = "recorded_trajectories"
     """Directory to save the raw npz trajectories for replay_debug.py."""
+    rec_name: str = "ep"
+    """Prefix for the saved .npz trajectory files (e.g. if 'test', saves as test_0.npz)."""
     record_resolution: int = 256
     """Resolution (HxW) for each frame in the recorded video. Use 128, 256, or 480."""
     debug: bool = False
@@ -568,7 +570,7 @@ def main(args: Args):
             if args.traj_dir and len(traj_rgb) > 0:
                 import os
                 os.makedirs(args.traj_dir, exist_ok=True)
-                save_path = os.path.join(args.traj_dir, f"ep_{episode_count}.npz")
+                save_path = os.path.join(args.traj_dir, f"{args.rec_name}_{episode_count}.npz")
                 np.savez_compressed(save_path, rgb=np.stack(traj_rgb), qpos=np.stack(traj_qpos))
                 print(f"Saved trajectory to {save_path}")
 

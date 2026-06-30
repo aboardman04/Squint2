@@ -8,6 +8,13 @@ import torch
 from transforms3d.euler import euler2quat
 
 import mani_skill.envs.utils.randomization as randomization
+import sys
+import os
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
@@ -159,9 +166,9 @@ class Stack(DefaultCameraEnv):
         self.itemA_dimensions = torch.stack([self.itemA_half_sizes] * 3, dim=-1)
 
 
-        # ItemA colors (red)
+        # ItemA colors
         colorsA = np.zeros((self.num_envs, 4))
-        colorsA[:, 0:3] = [0.91, 1.0, 0.94]
+        colorsA[:, 0:3] = env_cal.BLOCK_COLOR if env_cal else [0.91, 1.0, 0.94]
         colorsA[:, 3] = 1  # Alpha
 
         itemsA = []

@@ -8,6 +8,13 @@ import torch
 from transforms3d.euler import euler2quat
 
 import mani_skill.envs.utils.randomization as randomization
+import sys
+import os
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
@@ -129,7 +136,7 @@ class Place(DefaultCameraEnv):
 
         # Default values
         colors = np.zeros((self.num_envs, 3))
-        colors[:, :] = [0.91, 1.0, 0.94]
+        colors[:, :] = env_cal.BLOCK_COLOR if env_cal else [0.91, 1.0, 0.94]
         cfg = self.domain_randomization_config
         frictions = np.ones(self.num_envs) * (cfg.item_friction_range[0] + cfg.item_friction_range[1]) / 2
         densities = np.ones(self.num_envs) * (cfg.item_density_range[0] + cfg.item_density_range[1]) / 2
@@ -253,7 +260,8 @@ class Place(DefaultCameraEnv):
         self.add_to_state_dict_registry(self.item)
 
         # Build bins (per-env for domain randomization)
-        bin_color = sapien.render.RenderMaterial(base_color=[0.996, 0.918, 0.243, 1.0])
+        box_c = env_cal.BOX_COLOR if env_cal else [0.996, 0.918, 0.243, 1.0]
+        bin_color = sapien.render.RenderMaterial(base_color=box_c)
         thickness = 0.005
         self.bin_thickness = thickness
 

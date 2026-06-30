@@ -52,18 +52,27 @@ conda activate squint
 
 ## 🎮 Simulation Training
 
-## Configure Sim Environment
-Optimally adjust 
+### Configure Sim Environment
+Adjust `deploy_utils/robot_config.py` with your harware settings, specifically change the camera for the calibration of visuals.
+
+Optimally adjust your camera and sim environment before training so that your sim and real environment match up as well as possible. Run the command below to pull up an overlay of your real environment with you sim environment. Adjust the sim camera position to best align with your real set up. Alignment is important to help the robot navigate its suroundings, try to alight the base of the robot and the gripper as well as possible and make sure proportions seem mostly accurate. Adjsut the camera settigns with the sliders in the second window to optimze the visuals.
+```bash
+python deploy_utils/tune_camera.py
+```
+- In the window that opens press `p` once you have fine tuned your settings. This will print the values you adjusted to your terminal
+- In `env_cal.py` adjust the camer position, camera settings, and the colors of all of the things in your environment to match the exact colors in your camera once the camera settings have been adjusted.
+
+Note: Currently overlay is set to false, this can be turned on to match the configuation of the original squint experiment and apply a solid colored greenscreen as the sim background. With overlay off and shadows enabled it will match the real environment more closely.
 
 ### Basic Training
 
 Train an agent on the LiftCube task:
 
 ```bash
-python train_squint.py --env_id=SO101LiftCube-v1n--exp_name="file_name" --track --num_envs=128
+python train_squint.py --env_id=SO101LiftCube-v1 --exp_name="checkpoint_name" --track --num_envs=128
 ```
 This allows you to change the file name the policy is saved to, track it in wandb, and it reduces the number of environments being trained at once making it take longer to train but be able to train on less powerful GPUs. To use '--track' make sure you are logged into wandb in your terminal. The env_id is specific to the task you are training.
-Using '--checkpoint=runs/file_name/ckpt.pt' allows you to continue training an existing policy. 
+Using '--checkpoint=runs/checkpoint_name/ckpt.pt' allows you to continue training an existing policy. 
 
 ### Training with Weights & Biases Logging
 
@@ -94,6 +103,7 @@ python examples/visualize_sim.py
 | `SO101ReachCube-v1` | Reach to a target cube position | 2 minutes |
 | `SO101ReachCan-v1` | Reach to a target can position | 2 minutes |
 | `SO101LiftCube-v1` | Pick up and lift a cube | 3 minutes |
+| `2Camera-SO101LiftCube-v1` | Pick up and lift a cube with 2 camera angles  <--- I added this, it hasn't been tested yet
 | `SO101LiftCan-v1` | Pick up and lift a can | 4 minutes |
 | `SO101PlaceCube-v1` | Pick up a cube and place in the bin | 5 minutes |
 | `SO101PlaceCan-v1` | Pick up a can and place in the bin | 6 minutes |
@@ -115,6 +125,11 @@ For expected results, we show the plots of training with Squint agents below:
 <img width="100%" src="https://github.com/aalmuzairee/squint/blob/gh-pages/static/extras/imgs/per_task_results.png">
 </br>
 
+## Test in Sim
+Use this command to test your policy in simulation before deploying it in the real world
+```bash
+python simulate_policy.py --env_id=SO101LiftCube-v1 --checkpoint=runs/checkpoint_name/ckpt.pt
+```
 
 ## 🤖 Deployment on Real SO-101 Robot
 
@@ -142,6 +157,7 @@ of the tasks to match the real world objects.
 Edit `deploy_utils/robot_config.py` with your hardware settings. 
 
 ### Step 2: Tune Camera Alignment 
+Note: This step should have already been completed, the below is primarily relivant to the original squint configuration.
 
 Visual reinforcement learning agents are sensitive to slight visual changes. The more we reduce the difference, the better your agent will transfer. 
 We use a table with a black background. In ManiSkill3 simulation, we segment the objects of interest and replace the background with the image 
@@ -169,17 +185,8 @@ Run your trained agent on the real robot:
 
 ```bash
 python deploy.py \
-    --checkpoint=path/to/ckpt.pt \
+    --checkpoint=runs/checkpoint_name/ckpt.pt \
     --env_id=SO101LiftCube-v1
-```
-
-If you trained with wandb, your last checkpoint should have been uploaded to wandb. You can deploy it by running:
-
-```bash
-python deploy.py \
-    --checkpoint=wandb \
-    --env_id=SO101LiftCube-v1 \
-    --wandb_entity=YOUR_WANDB_USERNAME
 ```
 
 **Keyboard Controls During Deployment:**
@@ -193,6 +200,17 @@ python deploy.py \
 - If at any time during deployment you need to stop, you can press `q` or `ctrl+c`.
 - For best performances, run the robot in a well lit room with no sunlight.
 - For better transfer from sim to real, make sure the robot motor calibration is good, and the visual alignment between sim and real is good.
+
+## Debugging
+Once you have trained a model you can record a deployment with the below function.
+```bash
+python record_deploy.py --env_id=SO101LiftCube-v1 --checkpoint=runs/checkpoint_name/ckpt.pt --rec_name="test_run"
+```
+Use the command below to replay the recording with a side by side visual of the sim actions that were thought to be performed. 
+```bash
+python replay_debug.py --env_id=SO101LiftCube-v1 --rec_name="test_run"
+```
+Make sure the sim actions match up with the real actions and make sure the camera visuals are clear and accurate. If somehting is wrong you may need to adjust your calibration settings. 
 
 ## 📁 Project Structure
 

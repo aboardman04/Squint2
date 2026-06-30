@@ -29,6 +29,11 @@ from transforms3d.quaternions import qmult
 from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
 from mani_skill.utils.structs import Pose
 
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from deploy_utils.manipulator import LeRobotRealAgent
 from deploy_utils.robot_config import create_real_robot
 

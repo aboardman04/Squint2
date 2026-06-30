@@ -29,6 +29,11 @@ from transforms3d.quaternions import qmult
 from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
 from mani_skill.utils.structs import Pose
 
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from deploy_utils.manipulator import LeRobotRealAgent
 from deploy_utils.robot_config import create_real_robot
 
@@ -70,11 +75,11 @@ class LiveTwoCameraTuner:
         self.v4l2_device = "/dev/video2"
         
         # Initialize standard values
-        self.v4l2_exposure = 150
-        self.v4l2_wb = 4600
-        self.v4l2_brightness = 5
-        self.v4l2_contrast = 45
-        self.v4l2_saturation = 70
+        self.v4l2_exposure = env_cal.V4L2_OVERHEAD_EXPOSURE if env_cal else 150
+        self.v4l2_wb = env_cal.V4L2_OVERHEAD_WB if env_cal else 4600
+        self.v4l2_brightness = env_cal.V4L2_OVERHEAD_BRIGHTNESS if env_cal else 5
+        self.v4l2_contrast = env_cal.V4L2_OVERHEAD_CONTRAST if env_cal else 45
+        self.v4l2_saturation = env_cal.V4L2_OVERHEAD_SATURATION if env_cal else 70
         
         # Ensure auto-modes are turned off first
         subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=auto_exposure=1", shell=True, stderr=subprocess.DEVNULL)

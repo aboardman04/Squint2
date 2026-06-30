@@ -34,6 +34,14 @@ import sapien
 import torch
 from sapien.render import RenderBodyComponent
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 import mani_skill.envs.utils.randomization as randomization
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
@@ -167,7 +175,9 @@ class BaseRandomEnv(BaseEnv):
         if not hasattr(self, "table_scene"):
             return
         import sapien
-        blue_color = [0.145, 0.624, 0.839, 1.0]
+        
+        table_color = env_cal.TABLE_COLOR if env_cal else [0.145, 0.624, 0.839, 1.0]
+        
         for e in self.table_scene.table._objs:
             rc = e.find_component_by_type(sapien.render.RenderBodyComponent)
             if rc:
@@ -178,7 +188,7 @@ class BaseRandomEnv(BaseEnv):
                         mat.set_normal_texture(None)
                         mat.set_metallic_texture(None)
                         mat.set_roughness_texture(None)
-                        mat.set_base_color(blue_color)
+                        mat.set_base_color(table_color)
                         mat.set_roughness(0.9)
                         mat.set_metallic(0.0)
 
@@ -515,9 +525,9 @@ class WristCameraEnv(BaseRandomEnv):
     """
 
     # Base pose relative to gripper_link
-    WRIST_CAMERA_BASE_POS = (-0.0110, 0.0520, -0.0520)
-    WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))  # radians (roll, pitch, yaw)
-    WRIST_CAMERA_FOV = np.deg2rad(71.0)  # 71 degrees
+    WRIST_CAMERA_BASE_POS = env_cal.WRIST_CAMERA_BASE_POS if env_cal else (-0.0110, 0.0520, -0.0520)
+    WRIST_CAMERA_BASE_ROT_RAD = env_cal.WRIST_CAMERA_BASE_ROT_RAD if env_cal else (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))
+    WRIST_CAMERA_FOV = env_cal.WRIST_CAMERA_FOV if env_cal else np.deg2rad(71.0)
 
     def __init__(
         self,
