@@ -36,7 +36,7 @@ class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
 
 
-@register_env("SeparateInstruments-v1", max_episode_steps=50)
+@register_env("SeparateInstruments-v0", max_episode_steps=50)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
@@ -166,38 +166,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         self._load_camera_mount()
         self._randomize_robot_color()
 
-    def _sample_instrument_poses(self, b: int, base_pos: torch.Tensor):
-        xyz_1 = torch.zeros((b, 3), device=self.device)
-        xyz_1[:, :2] = (
-            torch.rand((b, 2), device=self.device) * self.spawn_box_half_size * 2
-            - self.spawn_box_half_size
-        )
-        xyz_1[:, :2] += base_pos[:, :2]
-        xyz_1[..., 2] = 0.008
-
-        yaw1 = torch.rand(b, device=self.device) * 2 * torch.pi
-        yaw2 = yaw1 + (torch.rand(b, device=self.device) - 0.5) * 0.1
-
-        q1 = torch.zeros((b, 4), device=self.device)
-        q1[:, 0] = torch.cos(yaw1 / 2)
-        q1[:, 3] = torch.sin(yaw1 / 2)
-
-        q2 = torch.zeros((b, 4), device=self.device)
-        q2[:, 0] = torch.cos(yaw2 / 2)
-        q2[:, 3] = torch.sin(yaw2 / 2)
-
-        perp_dir = torch.stack([-torch.sin(yaw1), torch.cos(yaw1)], dim=1)
-        par_dir = torch.stack([torch.cos(yaw1), torch.sin(yaw1)], dim=1)
-
-        side_dist = (torch.rand(b, device=self.device) * 0.01 + 0.01) * torch.sign(torch.randn(b, device=self.device))
-        fwd_dist = (torch.rand(b, device=self.device) - 0.5) * 0.10
-
-        xyz_2 = xyz_1.clone()
-        xyz_2[:, :2] += perp_dir * side_dist.unsqueeze(1) + par_dir * fwd_dist.unsqueeze(1)
-        xyz_2[..., 2] = 0.008
-        
-        return xyz_1, q1, xyz_2, q2
-
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
@@ -217,109 +185,30 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                 [self.spawn_box_pos[0], self.spawn_box_pos[1], 0]
             )
 
-            # 1. Sample and set poses for Forceps
-            p1, q1, p2, q2 = self._sample_instrument_poses(b, spawn_box_pos_tensor[env_idx])
-            self.obj_1.set_pose(Pose.create_from_pq(p=p1, q=q1))
-            self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
-
-            if not hasattr(self, "env_phase"):
-                self.env_phase = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-                self.settle_steps = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-                self.spawn_box_pos_tensor = self.agent.robot.pose.p + torch.tensor(
-                    [self.spawn_box_pos[0], self.spawn_box_pos[1], 0], device=self.device
-                )
-            
-            self.env_phase[env_idx] = 0
-            self.settle_steps[env_idx] = 0
-
-    def step(self, action: Union[None, np.ndarray, torch.Tensor, dict]):
-        if not hasattr(self, "env_phase"):
-            self.env_phase = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-            self.settle_steps = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-            self.spawn_box_pos_tensor = self.agent.robot.pose.p + torch.tensor(
-                [self.spawn_box_pos[0], self.spawn_box_pos[1], 0], device=self.device
+            # 1. Sample a base position on the table for Forceps 1
+            xyz_1 = torch.zeros((b, 3))
+            xyz_1[:, :2] = (
+                torch.rand((b, 2)) * self.spawn_box_half_size * 2
+                - self.spawn_box_half_size
             )
-
-        settle_duration = 5
-        settling = self.env_phase == 0
-
-        if action is not None and settling.any():
-            if isinstance(action, torch.Tensor):
-                action = action.clone()
-                action[settling] = 0.0
-            elif isinstance(action, np.ndarray):
-                action = action.copy()
-                # Use numpy indexing for numpy actions
-                if isinstance(settling, torch.Tensor):
-                    settling_np = settling.cpu().numpy()
-                else:
-                    settling_np = settling
-                action[settling_np] = 0.0
-
-        if settling.any():
-            vel1 = self.obj_1.linear_velocity.clone()
-            avel1 = self.obj_1.angular_velocity.clone()
-            vel2 = self.obj_2.linear_velocity.clone()
-            avel2 = self.obj_2.angular_velocity.clone()
+            xyz_1[:, :2] += spawn_box_pos_tensor[env_idx, :2]
+            xyz_1[..., 2] = torch.rand(b) * 0.05 + 0.02  # Random Z to allow 3D rotation above surface
             
-            vel1[settling] *= 0.1
-            avel1[settling] *= 0.1
-            vel2[settling] *= 0.1
-            avel2[settling] *= 0.1
+            # 2. Sample a 3D offset for Forceps 2 that guarantees an overlap/touch.
+            offsets = torch.randn((b, 3))
+            offsets_norm = torch.linalg.norm(offsets, dim=1, keepdim=True)
+            distances = torch.rand((b, 1)) * 0.04 + 0.01 
+            offsets = (offsets / (offsets_norm + 1e-8)) * distances
+
+            xyz_2 = xyz_1 + offsets
+            xyz_2[..., 2] = torch.clamp(xyz_2[..., 2], min=0.01)  # Keep above table
+
+            # Full 3D random rotations to allow any physically possible position
+            q1 = randomization.random_quaternions(b)
+            q2 = randomization.random_quaternions(b)
             
-            self.obj_1.set_linear_velocity(vel1)
-            self.obj_1.set_angular_velocity(avel1)
-            self.obj_2.set_linear_velocity(vel2)
-            self.obj_2.set_angular_velocity(avel2)
-
-        result = super().step(action)
-
-        if settling.any():
-            self.settle_steps[settling] += 1
-            done_settling = (self.env_phase == 0) & (self.settle_steps >= settle_duration)
-            
-            if done_settling.any():
-                dist = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
-                is_close = dist < 0.08
-                
-                success_idx = done_settling & is_close
-                self.env_phase[success_idx] = 1
-                
-                fail_idx = done_settling & ~is_close
-                num_fail = fail_idx.sum().item()
-                if num_fail > 0:
-                    reconfig_idxs = torch.where(fail_idx)[0]
-                    p1, q1, p2, q2 = self._sample_instrument_poses(num_fail, self.spawn_box_pos_tensor[reconfig_idxs])
-                    
-                    full_p1 = self.obj_1.pose.p.clone()
-                    full_q1 = self.obj_1.pose.q.clone()
-                    full_p2 = self.obj_2.pose.p.clone()
-                    full_q2 = self.obj_2.pose.q.clone()
-                    
-                    full_p1[reconfig_idxs] = p1
-                    full_q1[reconfig_idxs] = q1
-                    full_p2[reconfig_idxs] = p2
-                    full_q2[reconfig_idxs] = q2
-                    
-                    self.obj_1.set_pose(Pose.create_from_pq(p=full_p1, q=full_q1))
-                    self.obj_2.set_pose(Pose.create_from_pq(p=full_p2, q=full_q2))
-                    
-                    vel1 = self.obj_1.linear_velocity.clone()
-                    avel1 = self.obj_1.angular_velocity.clone()
-                    vel2 = self.obj_2.linear_velocity.clone()
-                    avel2 = self.obj_2.angular_velocity.clone()
-                    vel1[reconfig_idxs] = 0.0
-                    avel1[reconfig_idxs] = 0.0
-                    vel2[reconfig_idxs] = 0.0
-                    avel2[reconfig_idxs] = 0.0
-                    self.obj_1.set_linear_velocity(vel1)
-                    self.obj_1.set_angular_velocity(avel1)
-                    self.obj_2.set_linear_velocity(vel2)
-                    self.obj_2.set_angular_velocity(avel2)
-                    
-                    self.settle_steps[fail_idx] = 0
-
-        return result
+            self.obj_1.set_pose(Pose.create_from_pq(p=xyz_1, q=q1))
+            self.obj_2.set_pose(Pose.create_from_pq(p=xyz_2, q=q2))
 
     def evaluate(self):
         distance_between_objs = torch.linalg.norm(
@@ -358,10 +247,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
         # 1. Fixed Time Penalty (Critical for speed optimization)
         reward = torch.full((self.num_envs,), -0.05, device=self.device)
-        
-        if hasattr(self, "env_phase"):
-            settling = self.env_phase == 0
-            reward[settling] = 0.0
 
         # 2. Reaching Reward
         midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
