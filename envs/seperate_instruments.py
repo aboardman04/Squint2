@@ -10,7 +10,7 @@ from mani_skill.agents.robots import Fetch, Panda
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import common, sapien_utils
-from mani_skill.utils.building import actors
+from mani_skill.utils.building import actor_builder
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
@@ -83,27 +83,54 @@ class SerpateInstrumentsEnv(BaseEnv):
         # finally we specify an initial pose for the cube so that it doesn't collide with other objects initially
         
 #------Build Instruments------
-        self.obj = actors.build_cube(
-            self.scene,
-            half_size=self.instrument_half_size,
-            color=np.array([12, 42, 160, 255]) / 255,
-            name="cube",
-            body_type="dynamic",
-            initial_pose=sapien.Pose(p=[0, 0, self.instrument_half_size]),
+env.render_mode = "human" # Forces the SAPIEN viewer to open
+
+        obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forcepts.obj"
+        builder = self.scene.create_actor_builder()
+        builder.add_visual_from_file(
+            filename=obj_path,
+            scale=[1.0, 1.0, 1.0] # Adjust scaling factor if your asset is too large/small
         )
+
+        builder.add_convex_collision_from_file(
+            filename=obj_path,
+            scale=[1.0, 1.0, 1.0]
+        )
+        
+        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, 0.2], q=[1, 0, 0, 0])
+        
+        self.objs = builder.build(name="forcepts")
+        
+        builder.add_visual_from_file(filename="dressing_forcepts.obj")
+        builder.add_convex_collision_from_file(filename="dressing_forcepts.obj")
+        
+        #builder.set_physx_body_properties(
+        #     static_friction=0.5, 
+        #     dynamic_friction=0.5, 
+        #     restitution=0.1
+        # )
+
+        # self.obj = actors.build_cube(
+        #     self.scene,
+        #     half_size=self.instrument_half_size,
+        #     color=np.array([12, 42, 160, 255]) / 255,
+        #     name="cube",
+        #     body_type="dynamic",
+        #     initial_pose=sapien.Pose(p=[0, 0, self.instrument_half_size]),
+        # )
 
         # we also add in red/white target to visualize where we want the cube to be pushed to
         # we specify add_collisions=False as we only use this as a visual for videos and do not want it to affect the actual physics
         # we finally specify the body_type to be "kinematic" so that the object stays in place
-        self.goal_region = actors.build_red_white_target(
-            self.scene,
-            radius=self.goal_radius,
-            thickness=1e-5,
-            name="goal_region",
-            add_collision=False,
-            body_type="kinematic",
-            initial_pose=sapien.Pose(p=[0, 0, 1e-3]),
-        )
+        # self.goal_region = actors.build_red_white_target(
+        #     self.scene,
+        #     radius=self.goal_radius,
+        #     thickness=1e-5,
+        #     name="goal_region",
+        #     add_collision=False,
+        #     body_type="kinematic",
+        #     initial_pose=sapien.Pose(p=[0, 0, 1e-3]),
+        # )
 
         # optionally you can automatically hide some Actors from view by appending to the self._hidden_objects list. When visual observations
         # are generated or env.render_sensors() is called or env.render() is called with render_mode="sensors", the actor will not show up.
