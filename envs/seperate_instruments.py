@@ -6,6 +6,7 @@ import torch
 import torch.random
 from transforms3d.euler import euler2quat
 
+# Core ManiSkill imports
 from mani_skill.agents.robots import Fetch, Panda
 from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
@@ -17,24 +18,23 @@ from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
 
+from .robot.so101 import SO101
+
+
 @register_env("SeparateInstruments-v1", max_episode_steps=50)
 class SeparateInstrumentsEnv(BaseEnv):
 
-    SUPPORTED_ROBOTS = ["panda", "fetch"]
+    SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
 
-    # Specify some supported robot types
-    agent: Union[Panda, Fetch]
+    agent: Union[SO101, Panda, Fetch]
 
-    # set some commonly used values
     goal_radius = 0.1
     instrument_half_size = 0.075
 
-    def __init__(self, *args, robot_uids="panda", robot_init_qpos_noise=0.02, **kwargs):
-        # specifying robot_uids="panda" as the default means gym.make("PushCube-v1") will default to using the panda arm.
+    def __init__(self, *args, robot_uids="so101", robot_init_qpos_noise=0.02, **kwargs):
         self.robot_init_qpos_noise = robot_init_qpos_noise
         super().__init__(*args, robot_uids=robot_uids, **kwargs)
 
-    # Specify default simulation/gpu memory configurations to override any default values
     @property
     def _default_sim_config(self):
         return SimConfig(
@@ -45,8 +45,6 @@ class SeparateInstrumentsEnv(BaseEnv):
 
     @property
     def _default_sensor_configs(self):
-        # registers one 128x128 camera looking at the robot, cube, and target
-        # a smaller sized camera will be lower quality, but render faster
         pose = sapien_utils.look_at(eye=[0.3, 0, 0.6], target=[-0.1, 0, 0.1])
         return [
             CameraConfig(
@@ -62,182 +60,119 @@ class SeparateInstrumentsEnv(BaseEnv):
 
     @property
     def _default_human_render_camera_configs(self):
-        # registers a more high-definition (512x512) camera used just for rendering when render_mode="rgb_array" or calling env.render_rgb_array()
         pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
         return CameraConfig(
             "render_camera", pose=pose, width=512, height=512, fov=1, near=0.01, far=100
         )
 
     def _load_agent(self, options: dict):
-        # set a reasonable initial pose for the agent that doesn't intersect other objects
-        super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
+        super()._load_agent(options, sapien.Pose(p=[-0.35, 0, 0]))
 
     def _load_scene(self, options: dict):
-        # we use a prebuilt scene builder class that automatically loads in a floor and table.
         self.table_scene = TableSceneBuilder(
             env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
         )
         self.table_scene.build()
-
-        # we then add the cube that we want to push and give it a color and size using a convenience build_cube function
-        # we specify the body_type to be "dynamic" as it should be able to move when touched by other objects / the robot
-        # finally we specify an initial pose for the cube so that it doesn't collide with other objects initially
         
-        #------Build Instruments------
-env.render_mode = "human" # Forces the SAPIEN viewer to open
+        #------ Build Instruments ------
         obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
-        builder = self.scene.create_actor_builder()
-        builder.add_visual_from_file(
-            filename=obj_path,
-            scale=[1.0, 1.0, 1.0] # Adjust scaling factor if your asset is too large/small
+
+        steel_material = sapien.render.RenderMaterial(
+            base_color=[0.44, 0.44, 0.44, 1.0], 
+            roughness=0.15,                     
+            metallic=1.0                        
         )
 
-        builder.add_convex_collision_from_file(
-            filename=obj_path,
-            scale=[1.0, 1.0, 1.0]
-            decomposition="coacd"
+        physx_material = sapien.physx.PhysxMaterial(
+            static_friction=0.6,
+            dynamic_friction=0.5,
+            restitution=0.1
         )
         
-        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, 0.2], q=[1, 0, 0, 0])
-        
-        self.obj = builder.build(name="forceps")
-        
-        #builder.set_physx_body_properties(
-        #     static_friction=0.5, 
-        #     dynamic_friction=0.5, 
-        #     restitution=0.1
-        # )
+        # --- Forceps 1 ---
+        builder1 = self.scene.create_actor_builder()
+        builder1.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder1.add_multiple_convex_collisions_from_file(
+            filename=obj_path, decomposition="coacd", material=physx_material
+        ) 
+        builder1.initial_pose = sapien.Pose(p=[-0.1, 0.0, 0.1], q=[1, 0, 0, 0])
+        self.obj_1 = builder1.build(name="forceps_1")
 
-        # self.obj = actors.build_cube(
-        #     self.scene,
-        #     half_size=self.instrument_half_size,
-        #     color=np.array([12, 42, 160, 255]) / 255,
-        #     name="cube",
-        #     body_type="dynamic",
-        #     initial_pose=sapien.Pose(p=[0, 0, self.instrument_half_size]),
-        # )
-
-        # we also add in red/white target to visualize where we want the cube to be pushed to
-        # we specify add_collisions=False as we only use this as a visual for videos and do not want it to affect the actual physics
-        # we finally specify the body_type to be "kinematic" so that the object stays in place
-        self.goal_region = actors.build_red_white_target(
-            self.scene,
-            radius=self.goal_radius,
-            thickness=1e-5,
-            name="goal_region",
-            add_collision=False,
-            body_type="kinematic",
-            initial_pose=sapien.Pose(p=[0, 0, 1e-3]),
+        # --- Forceps 2 ---
+        builder2 = self.scene.create_actor_builder()
+        builder2.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder2.add_multiple_convex_collisions_from_file(
+            filename=obj_path, decomposition="coacd", material=physx_material
         )
-
-        # optionally you can automatically hide some Actors from view by appending to the self._hidden_objects list. When visual observations
-        # are generated or env.render_sensors() is called or env.render() is called with render_mode="sensors", the actor will not show up.
-        # This is useful if you intend to add some visual goal sites as e.g. done in PickCube that aren't actually part of the task
-        # and are there just for generating evaluation videos.
-        self._hidden_objects.append(self.goal_region)
+        builder2.initial_pose = sapien.Pose(p=[0.1, 0.0, 0.1])
+        self.obj_2 = builder2.build(name="forceps_2")
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
-        # use the torch.device context manager to automatically create tensors on CPU or CUDA depending on self.device, the device the environment runs on
         with torch.device(self.device):
-            # the initialization functions where you as a user place all the objects and initialize their properties
-            # are designed to support partial resets, where you generate initial state for a subset of the environments.
-            # this is done by using the env_idx variable, which also tells you the batch size
             b = len(env_idx)
-            # when using scene builders, you must always call .initialize on them so they can set the correct poses of objects in the prebuilt scene
-            # note that the table scene is built such that z=0 is the surface of the table.
             self.table_scene.initialize(env_idx)
 
-            # here we write some randomization code that randomizes the x, y position of the cube we are pushing in the range [-0.1, -0.1] to [0.1, 0.1]
-            xyz = torch.zeros((b, 3))
-            xyz[..., :2] = torch.rand((b, 2)) * 0.2 - 0.1
-            xyz[..., 2] = self.instrument_half_size
-            q = [1, 0, 0, 0]
-            # we can then create a pose object using Pose.create_from_pq to then set the cube pose with. Note that even though our quaternion
-            # is not batched, Pose.create_from_pq will automatically batch p or q accordingly
-            # furthermore, notice how here we do not even use env_idx as a variable to say set the pose for objects in desired
-            # environments. This is because internally any calls to set data on the GPU buffer (e.g. set_pose, set_linear_velocity etc.)
-            # automatically are masked so that you can only set data on objects in environments that are meant to be initialized
-            obj_pose = Pose.create_from_pq(p=xyz, q=q)
-            self.obj.set_pose(obj_pose)
+            # Randomize positions for Forceps 1
+            xyz_1 = torch.zeros((b, 3))
+            xyz_1[..., 0] = torch.rand(b) * 0.15 - 0.15  
+            xyz_1[..., 1] = torch.rand(b) * 0.2 - 0.1
+            xyz_1[..., 2] = 0.005 
+            
+            # Randomize positions for Forceps 2
+            xyz_2 = torch.zeros((b, 3))
+            xyz_2[..., 0] = torch.rand(b) * 0.15        
+            xyz_2[..., 1] = torch.rand(b) * 0.2 - 0.1
+            xyz_2[..., 2] = 0.005
 
-            # here we set the location of that red/white target (the goal region). In particular here, we set the position to be in front of the cube
-            # and we further rotate 90 degrees on the y-axis to make the target object face up
-            target_region_xyz = xyz + torch.tensor([0.1 + self.goal_radius, 0, 0])
-            # set a little bit above 0 so the target is sitting on the table
-            target_region_xyz[..., 2] = 1e-3
-            self.goal_region.set_pose(
-                Pose.create_from_pq(
-                    p=target_region_xyz,
-                    q=euler2quat(0, np.pi / 2, 0),
-                )
-            )
+            q = [1, 0, 0, 0]
+            
+            self.obj_1.set_pose(Pose.create_from_pq(p=xyz_1, q=q))
+            self.obj_2.set_pose(Pose.create_from_pq(p=xyz_2, q=q))
 
     def evaluate(self):
-        # success is achieved when the cube's xy position on the table is within the
-        # goal region's area (a circle centered at the goal region's xy position) and
-        # the cube is still on the surface
-        is_obj_placed = (
-            torch.linalg.norm(
-                self.obj.pose.p[..., :2] - self.goal_region.pose.p[..., :2], axis=1
-            )
-            < self.goal_radius
-        ) & (self.obj.pose.p[..., 2] < self.instrument_half_size + 5e-3)
-
+        distance_between_objs = torch.linalg.norm(
+            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
+        )
+        is_separated = distance_between_objs > 0.20
         return {
-            "success": is_obj_placed,
+            "success": is_separated,
         }
 
     def _get_obs_extra(self, info: dict):
-        # some useful observation info for solving the task includes the pose of the tcp (tool center point) which is the point between the
-        # grippers of the robot
+        # FIX: Adjusted to match your working local SO101 structural properties
         obs = dict(
-            tcp_pose=self.agent.tcp.pose.raw_pose,
+            qpos=self.agent.robot.get_qpos(),
+            tcp_pose=self.agent.tcp_pose.raw_pose,
         )
         if self.obs_mode_struct.use_state:
-            # if the observation mode requests to use state, we provide ground truth information about where the cube is.
-            # for visual observation modes one should rely on the sensed visual data to determine where the cube is
             obs.update(
-                goal_pos=self.goal_region.pose.p,
-                obj_pose=self.obj.pose.raw_pose,
+                obj_1_pose=self.obj_1.pose.raw_pose,
+                obj_2_pose=self.obj_2.pose.raw_pose, 
             )
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
-        # We also create a pose marking where the robot should push the cube from that is easiest (pushing from behind the cube)
-        tcp_push_pose = Pose.create_from_pq(
-            p=self.obj.pose.p
-            + torch.tensor([-self.instrument_half_size - 0.005, 0, 0], device=self.device)
-        )
-        tcp_to_push_pose = tcp_push_pose.p - self.agent.tcp.pose.p
-        tcp_to_push_pose_dist = torch.linalg.norm(tcp_to_push_pose, axis=1)
-        reaching_reward = 1 - torch.tanh(5 * tcp_to_push_pose_dist)
+        # 1. Reaching Reward: Use self.agent.tcp_pos for spatial distance logic
+        midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
+        tcp_to_objs_dist = torch.linalg.norm(midpoint_objs - self.agent.tcp_pos, axis=1)
+        reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
         reward = reaching_reward
 
-        # compute a placement reward to encourage robot to move the cube to the center of the goal region
-        # we further multiply the place_reward by a mask reached so we only add the place reward if the robot has reached the desired push pose
-        # This reward design helps train RL agents faster by staging the reward out.
-        reached = tcp_to_push_pose_dist < 0.01
-        obj_to_goal_dist = torch.linalg.norm(
-            self.obj.pose.p[..., :2] - self.goal_region.pose.p[..., :2], axis=1
+        # 2. Separation Reward
+        distance_between_objs = torch.linalg.norm(
+            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
         )
-        place_reward = 1 - torch.tanh(5 * obj_to_goal_dist)
-        reward += place_reward * reached
+        
+        target_separation = 0.25
+        separation_reward = torch.clamp(distance_between_objs / target_separation, max=1.0)
+        
+        arm_is_close = tcp_to_objs_dist < 0.15
+        reward += separation_reward * arm_is_close
 
-        # Compute a z reward to encourage the robot to keep the cube on the table
-        desired_obj_z = self.instrument_half_size
-        current_obj_z = self.obj.pose.p[..., 2]
-        z_deviation = torch.abs(current_obj_z - desired_obj_z)
-        z_reward = 1 - torch.tanh(5 * z_deviation)
-        # We multiply the z reward by the place_reward and reached mask so that
-        #   we only add the z reward if the robot has reached the desired push pose
-        #   and the z reward becomes more important as the robot gets closer to the goal.
-        reward += place_reward * z_reward * reached
-
-        # assign rewards to parallel environments that achieved success to the maximum of 3.
-        reward[info["success"]] = 4
+        # 3. Success Bonus
+        reward[info["success"]] = 4.0
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        # this should be equal to compute_dense_reward / max possible reward
         max_reward = 4.0
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward
