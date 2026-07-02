@@ -17,7 +17,7 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
-
+import mani_skill.envs.utils.randomization as randomization
 from .robot.so101 import SO101
 
 
@@ -112,22 +112,36 @@ class SeparateInstrumentsEnv(BaseEnv):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
 
-            # Randomize positions for Forceps 1
+            # 1. Sample a base position on the table for Forceps 1
             xyz_1 = torch.zeros((b, 3))
-            xyz_1[..., 0] = torch.rand(b) * 0.15 - 0.15  
-            xyz_1[..., 1] = torch.rand(b) * 0.2 - 0.1
-            xyz_1[..., 2] = 0.005 
+            xyz_1[..., 0] = torch.rand(b) * 0.2 - 0.1  # Center around X=0
+            xyz_1[..., 1] = torch.rand(b) * 0.2 - 0.1  # Center around Y=0
+            xyz_1[..., 2] = 0.005  # Just above the table surface
             
-            # Randomize positions for Forceps 2
-            xyz_2 = torch.zeros((b, 3))
-            xyz_2[..., 0] = torch.rand(b) * 0.15        
-            xyz_2[..., 1] = torch.rand(b) * 0.2 - 0.1
-            xyz_2[..., 2] = 0.005
+            # 2. Sample an offset for Forceps 2 that guarantees an overlap/touch.
+            # Forceps half-size is ~0.075, so an offset smaller than 0.08 ensures they collide.
+            offsets = torch.zeros((b, 3))
+            
+            # Random angle in the XY plane to distribute the offset direction
+            angles = torch.rand(b) * 2.0 * np.pi
+            # Distance between centers (0.01 to 0.06 meters ensures overlap)
+            distances = torch.rand(b) * 0.05 + 0.01 
+            
+            offsets[..., 0] = torch.cos(angles) * distances
+            offsets[..., 1] = torch.sin(angles) * distances
+            offsets[..., 2] = 0.0  # Keep them on the same Z height
 
-            q = [1, 0, 0, 0]
+            # Forceps 2 position is Forceps 1 + the overlapping offset
+            xyz_2 = xyz_1 + offsets
+
+            # 3. Optional: Randomize the Z-axis rotation of both forceps 
+            # so they aren't always perfectly parallel when overlapping
+            q1 = randomization.random_quaternions(b, lock_x=True, lock_y=True)
+            q2 = randomization.random_quaternions(b, lock_x=True, lock_y=True)
             
-            self.obj_1.set_pose(Pose.create_from_pq(p=xyz_1, q=q))
-            self.obj_2.set_pose(Pose.create_from_pq(p=xyz_2, q=q))
+            # Set the calculated poses in the simulation
+            self.obj_1.set_pose(Pose.create_from_pq(p=xyz_1, q=q1))
+            self.obj_2.set_pose(Pose.create_from_pq(p=xyz_2, q=q2))
 
     def evaluate(self):
         distance_between_objs = torch.linalg.norm(
