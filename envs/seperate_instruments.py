@@ -1,14 +1,22 @@
-from typing import Any, Union
+from dataclasses import asdict, dataclass
+from typing import Any, Union, Optional, Sequence
 
+import dacite
 import numpy as np
 import sapien
 import torch
 import torch.random
 from transforms3d.euler import euler2quat
 
-# Core ManiSkill imports
+import mani_skill.envs.utils.randomization as randomization
+import sys
+import os
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from mani_skill.agents.robots import Fetch, Panda
-from mani_skill.envs.sapien_env import BaseEnv
 from mani_skill.sensors.camera import CameraConfig
 from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.building import actor_builder
@@ -17,23 +25,75 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import Array, GPUMemoryConfig, SimConfig
-import mani_skill.envs.utils.randomization as randomization
+
+from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
+from .robot.so100 import SO100
 from .robot.so101 import SO101
 
 
+@dataclass
+class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
+    robot_qpos_noise_std: float = np.deg2rad(5)
+
+
 @register_env("SeparateInstruments-v1", max_episode_steps=50)
-class SeparateInstrumentsEnv(BaseEnv):
+class SeparateInstrumentsEnv(DefaultCameraEnv):
 
-    SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
-
-    agent: Union[SO101, Panda, Fetch]
+    SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
+    SUPPORTED_OBS_MODES = ["none", "state", "state_dict", "rgb", "rgb+segmentation", "rgb+state", "rgb+segmentation+state",
+                           "rgb+depth+segmentation", "rgb+depth+segmentation+state"]
+    agent: Union[SO100, SO101, Panda, Fetch]
 
     goal_radius = 0.1
     instrument_half_size = 0.075
 
-    def __init__(self, *args, robot_uids="so101", robot_init_qpos_noise=0.02, **kwargs):
-        self.robot_init_qpos_noise = robot_init_qpos_noise
-        super().__init__(*args, robot_uids=robot_uids, **kwargs)
+    def __init__(
+        self,
+        *args,
+        robot_uids="so101",
+        control_mode="pd_joint_target_delta_pos",
+        domain_randomization_config: Union[
+            SeparateInstrumentsRandomizationConfig, dict
+        ] = SeparateInstrumentsRandomizationConfig(),
+        domain_randomization=False,
+        spawn_box_pos=[0.3, 0],
+        spawn_box_half_size=0.2 / 2,
+        **kwargs,
+    ):
+        # Robot-specific configuration
+        if robot_uids == "so100":
+            self.base_z_rot = np.pi / 2
+            self.rest_qpos = [0, 0, 0, np.pi / 2, np.pi / 2, 0]
+        elif robot_uids == "so101":
+            self.base_z_rot = 0
+            self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
+        else:
+            self.base_z_rot = 0
+            self.rest_qpos = None
+
+        self.domain_randomization_config = SeparateInstrumentsRandomizationConfig()
+        merged_domain_randomization_config = self.domain_randomization_config.dict()
+        if isinstance(domain_randomization_config, dict):
+            common.dict_merge(merged_domain_randomization_config, domain_randomization_config)
+            self.domain_randomization_config = dacite.from_dict(
+                data_class=SeparateInstrumentsRandomizationConfig,
+                data=merged_domain_randomization_config,
+                config=dacite.Config(strict=True),
+            )
+        elif isinstance(domain_randomization_config, SeparateInstrumentsRandomizationConfig):
+            self.domain_randomization_config = domain_randomization_config
+
+        self.spawn_box_pos = spawn_box_pos
+        self.spawn_box_half_size = spawn_box_half_size
+
+        super().__init__(
+            *args,
+            robot_uids=robot_uids,
+            control_mode=control_mode,
+            domain_randomization=domain_randomization,
+            domain_randomization_config=self.domain_randomization_config,
+            **kwargs,
+        )
 
     @property
     def _default_sim_config(self):
@@ -43,36 +103,20 @@ class SeparateInstrumentsEnv(BaseEnv):
             )
         )
 
-    @property
-    def _default_sensor_configs(self):
-        pose = sapien_utils.look_at(eye=[0.3, 0, 0.6], target=[-0.1, 0, 0.1])
-        return [
-            CameraConfig(
-                "base_camera",
-                pose=pose,
-                width=128,
-                height=128,
-                fov=np.pi / 2,
-                near=0.01,
-                far=100,
-            )
-        ]
-
-    @property
-    def _default_human_render_camera_configs(self):
-        pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
-        return CameraConfig(
-            "render_camera", pose=pose, width=512, height=512, fov=1, near=0.01, far=100
-        )
-
     def _load_agent(self, options: dict):
-        super()._load_agent(options, sapien.Pose(p=[-0.35, 0, 0]))
+        super()._load_agent(
+            options,
+            sapien.Pose(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot)),
+            build_separate=True
+            if self.domain_randomization
+            and self.domain_randomization_config.robot_color == "random"
+            else False,
+        )
 
     def _load_scene(self, options: dict):
-        self.table_scene = TableSceneBuilder(
-            env=self, robot_init_qpos_noise=self.robot_init_qpos_noise
-        )
+        self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
+        self._color_table()
         
         #------ Build Instruments ------
         obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
@@ -107,39 +151,62 @@ class SeparateInstrumentsEnv(BaseEnv):
         builder2.initial_pose = sapien.Pose(p=[0.1, 0.0, 0.1])
         self.obj_2 = builder2.build(name="forceps_2")
 
+        if self.apply_greenscreen:
+            self.remove_object_from_greenscreen(self.agent.robot)
+            self.remove_object_from_greenscreen(self.obj_1)
+            self.remove_object_from_greenscreen(self.obj_2)
+
+        if self.rest_qpos is not None:
+            self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
+            
+        self.table_pose = Pose.create_from_pq(
+            p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2)
+        )
+
+        self._load_camera_mount()
+        self._randomize_robot_color()
+
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
+        super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
+            self.table_scene.table.set_pose(self.table_pose)
+
+            if self.rest_qpos is not None:
+                self.agent.robot.set_qpos(
+                    self.rest_qpos + torch.randn(size=(b, self.rest_qpos.shape[-1])) * self.domain_randomization_config.initial_qpos_noise_scale
+                )
+            self.agent.robot.set_pose(
+                Pose.create_from_pq(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot))
+            )
+
+            spawn_box_pos_tensor = self.agent.robot.pose.p + torch.tensor(
+                [self.spawn_box_pos[0], self.spawn_box_pos[1], 0]
+            )
 
             # 1. Sample a base position on the table for Forceps 1
             xyz_1 = torch.zeros((b, 3))
-            xyz_1[..., 0] = torch.rand(b) * 0.2 - 0.1  # Center around X=0
-            xyz_1[..., 1] = torch.rand(b) * 0.2 - 0.1  # Center around Y=0
-            xyz_1[..., 2] = 0.005  # Just above the table surface
+            xyz_1[:, :2] = (
+                torch.rand((b, 2)) * self.spawn_box_half_size * 2
+                - self.spawn_box_half_size
+            )
+            xyz_1[:, :2] += spawn_box_pos_tensor[env_idx, :2]
+            xyz_1[..., 2] = torch.rand(b) * 0.05 + 0.02  # Random Z to allow 3D rotation above surface
             
-            # 2. Sample an offset for Forceps 2 that guarantees an overlap/touch.
-            # Forceps half-size is ~0.075, so an offset smaller than 0.08 ensures they collide.
-            offsets = torch.zeros((b, 3))
-            
-            # Random angle in the XY plane to distribute the offset direction
-            angles = torch.rand(b) * 2.0 * np.pi
-            # Distance between centers (0.01 to 0.06 meters ensures overlap)
-            distances = torch.rand(b) * 0.05 + 0.01 
-            
-            offsets[..., 0] = torch.cos(angles) * distances
-            offsets[..., 1] = torch.sin(angles) * distances
-            offsets[..., 2] = 0.0  # Keep them on the same Z height
+            # 2. Sample a 3D offset for Forceps 2 that guarantees an overlap/touch.
+            offsets = torch.randn((b, 3))
+            offsets_norm = torch.linalg.norm(offsets, dim=1, keepdim=True)
+            distances = torch.rand((b, 1)) * 0.04 + 0.01 
+            offsets = (offsets / (offsets_norm + 1e-8)) * distances
 
-            # Forceps 2 position is Forceps 1 + the overlapping offset
             xyz_2 = xyz_1 + offsets
+            xyz_2[..., 2] = torch.clamp(xyz_2[..., 2], min=0.01)  # Keep above table
 
-            # 3. Optional: Randomize the Z-axis rotation of both forceps 
-            # so they aren't always perfectly parallel when overlapping
-            q1 = randomization.random_quaternions(b, lock_x=True, lock_y=True)
-            q2 = randomization.random_quaternions(b, lock_x=True, lock_y=True)
+            # Full 3D random rotations to allow any physically possible position
+            q1 = randomization.random_quaternions(b)
+            q2 = randomization.random_quaternions(b)
             
-            # Set the calculated poses in the simulation
             self.obj_1.set_pose(Pose.create_from_pq(p=xyz_1, q=q1))
             self.obj_2.set_pose(Pose.create_from_pq(p=xyz_2, q=q2))
 
@@ -148,17 +215,29 @@ class SeparateInstrumentsEnv(BaseEnv):
             self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
         )
         is_separated = distance_between_objs > 0.20
+        robot_touching_table = self.agent.is_touching(self.table_scene.table)
         return {
             "success": is_separated,
+            "robot_touching_table": robot_touching_table
         }
 
+    def _get_obs_agent(self):
+        qpos = self.agent.robot.get_qpos()
+        if self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0:
+            noise = torch.randn_like(qpos) * self.domain_randomization_config.robot_qpos_noise_std
+            qpos = qpos + noise
+        obs = dict(noisy_qpos=qpos)
+        controller_state = self.agent.controller.get_state()
+        if len(controller_state) > 0:
+            obs.update(controller=controller_state)
+        return obs
+
     def _get_obs_extra(self, info: dict):
-        # FIX: Adjusted to match your working local SO101 structural properties
         obs = dict(
             qpos=self.agent.robot.get_qpos(),
             tcp_pose=self.agent.tcp_pose.raw_pose,
         )
-        if self.obs_mode_struct.use_state:
+        if self.obs_mode_struct.state:
             obs.update(
                 obj_1_pose=self.obj_1.pose.raw_pose,
                 obj_2_pose=self.obj_2.pose.raw_pose, 
@@ -166,27 +245,36 @@ class SeparateInstrumentsEnv(BaseEnv):
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
-        # 1. Reaching Reward: Use self.agent.tcp_pos for spatial distance logic
+        # 1. Fixed Time Penalty (Critical for speed optimization)
+        reward = torch.full((self.num_envs,), -0.05, device=self.device)
+
+        # 2. Reaching Reward
         midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
         tcp_to_objs_dist = torch.linalg.norm(midpoint_objs - self.agent.tcp_pos, axis=1)
+        
         reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
-        reward = reaching_reward
+        reward += reaching_reward
 
-        # 2. Separation Reward
+        # 3. Separation Reward (Drives the fast splitting motion)
         distance_between_objs = torch.linalg.norm(
             self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
         )
         
-        target_separation = 0.25
-        separation_reward = torch.clamp(distance_between_objs / target_separation, max=1.0)
+        target_separation = 0.20
+        separation_reward = 3.0 * (1.0 - torch.tanh(3.0 * (target_separation - distance_between_objs)))
         
         arm_is_close = tcp_to_objs_dist < 0.15
-        reward += separation_reward * arm_is_close
+        reward += torch.where(arm_is_close, separation_reward, torch.zeros_like(reward))
 
-        # 3. Success Bonus
-        reward[info["success"]] = 4.0
+        # 4. Success Bonus (Massive payout to heavily favor early termination)
+        reward[info["success"]] = 10.0
+
+        # 5. Operational Penalties
+        if "robot_touching_table" in info:
+            reward -= 2.0 * info["robot_touching_table"].float()
+
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 4.0
+        max_reward = 14.0 
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward
