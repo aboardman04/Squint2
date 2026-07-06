@@ -11,16 +11,21 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 
+import torch
+if not torch.cuda.is_available():
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import signal
 import atexit
 import argparse
+import subprocess
+import re
 
 import cv2
 import numpy as np
-import torch
 import gymnasium as gym
 import sapien
 from transforms3d.euler import euler2quat
@@ -65,6 +70,54 @@ class LiveCameraTuner:
         self._move_real_to_sim_pose()
         self._setup_exit()
         self._setup_ui()
+        self._setup_v4l2_trackbars()
+
+    def _setup_v4l2_trackbars(self):
+        self.v4l2_win = "Wrist Camera V4L2 Controls"
+        cv2.namedWindow(self.v4l2_win, cv2.WINDOW_NORMAL)
+        
+        # Wrist camera default device
+        self.v4l2_device = "/dev/video4"
+        
+        # Initialize standard values
+        self.v4l2_exposure = env_cal.V4L2_WRIST_EXPOSURE if env_cal else 243
+        self.v4l2_wb = env_cal.V4L2_WRIST_WB if env_cal else 2800
+        self.v4l2_brightness = env_cal.V4L2_WRIST_BRIGHTNESS if env_cal else -10
+        self.v4l2_contrast = env_cal.V4L2_WRIST_CONTRAST if env_cal else 23
+        self.v4l2_saturation = env_cal.V4L2_WRIST_SATURATION if env_cal else 41
+        
+        # Ensure auto-modes are turned off first
+        subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=auto_exposure=1", shell=True, stderr=subprocess.DEVNULL)
+        subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=white_balance_automatic=0", shell=True, stderr=subprocess.DEVNULL)
+        
+        def set_exposure(val):
+            val = max(1, val)  # min 1
+            self.v4l2_exposure = val
+            subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=exposure_time_absolute={val}", shell=True, stderr=subprocess.DEVNULL)
+            
+        def set_wb(val):
+            val = max(2800, val) # min 2800
+            self.v4l2_wb = val
+            subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=white_balance_temperature={val}", shell=True, stderr=subprocess.DEVNULL)
+            
+        def set_brightness(val):
+            val = val - 64 # Shift range from [0, 128] to [-64, 64]
+            self.v4l2_brightness = val
+            subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=brightness={val}", shell=True, stderr=subprocess.DEVNULL)
+            
+        def set_contrast(val):
+            self.v4l2_contrast = val
+            subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=contrast={val}", shell=True, stderr=subprocess.DEVNULL)
+            
+        def set_saturation(val):
+            self.v4l2_saturation = val
+            subprocess.run(f"v4l2-ctl -d {self.v4l2_device} --set-ctrl=saturation={val}", shell=True, stderr=subprocess.DEVNULL)
+            
+        cv2.createTrackbar("Exposure", self.v4l2_win, self.v4l2_exposure, 1000, set_exposure)
+        cv2.createTrackbar("White Bal", self.v4l2_win, self.v4l2_wb, 6500, set_wb)
+        cv2.createTrackbar("Brightness", self.v4l2_win, self.v4l2_brightness + 64, 128, set_brightness)
+        cv2.createTrackbar("Contrast", self.v4l2_win, self.v4l2_contrast, 64, set_contrast)
+        cv2.createTrackbar("Saturation", self.v4l2_win, self.v4l2_saturation, 128, set_saturation)
 
     # --- Sim environment ---
 
@@ -283,16 +336,60 @@ class LiveCameraTuner:
         print(f"  WRIST_CAMERA_BASE_POS = ({self.cam_x:.4f}, {self.cam_y:.4f}, {self.cam_z:.4f})")
         print(f"  WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad({self.cam_roll:.1f}), np.deg2rad({self.cam_pitch:.1f}), np.deg2rad({self.cam_yaw:.1f}))")
         print(f"  WRIST_CAMERA_FOV = np.deg2rad({self.cam_fov:.1f})")
+        print(f"\nHardware Camera settings (v4l2-ctl for {self.v4l2_device}):")
+        print(f"  Exposure: {self.v4l2_exposure}")
+        print(f"  White Balance: {self.v4l2_wb}")
+        print(f"  Brightness: {self.v4l2_brightness}")
+        print(f"  Contrast: {self.v4l2_contrast}")
+        print(f"  Saturation: {self.v4l2_saturation}")
         print(f"{'='*60}\n")
+
+    def _save_to_env_cal(self):
+        env_cal_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "env_cal.py")
+        if not os.path.exists(env_cal_path):
+            print(f"Error: {env_cal_path} not found.")
+            return
+
+        with open(env_cal_path, "r") as f:
+            content = f.read()
+
+        # Update pos, rot, fov
+        content = re.sub(
+            r"WRIST_CAMERA_BASE_POS\s*=\s*.*",
+            f"WRIST_CAMERA_BASE_POS = ({self.cam_x:.4f}, {self.cam_y:.4f}, {self.cam_z:.4f})",
+            content
+        )
+        content = re.sub(
+            r"WRIST_CAMERA_BASE_ROT_RAD\s*=\s*.*",
+            f"WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad({self.cam_roll:.1f}), np.deg2rad({self.cam_pitch:.1f}), np.deg2rad({self.cam_yaw:.1f}))",
+            content
+        )
+        content = re.sub(
+            r"WRIST_CAMERA_FOV\s*=\s*.*",
+            f"WRIST_CAMERA_FOV = np.deg2rad({self.cam_fov:.1f})",
+            content
+        )
+
+        # Update V4L2 settings
+        content = re.sub(r"V4L2_WRIST_EXPOSURE\s*=\s*\d+", f"V4L2_WRIST_EXPOSURE = {self.v4l2_exposure}", content)
+        content = re.sub(r"V4L2_WRIST_WB\s*=\s*\d+", f"V4L2_WRIST_WB = {self.v4l2_wb}", content)
+        content = re.sub(r"V4L2_WRIST_BRIGHTNESS\s*=\s*-?\d+", f"V4L2_WRIST_BRIGHTNESS = {self.v4l2_brightness}", content)
+        content = re.sub(r"V4L2_WRIST_CONTRAST\s*=\s*\d+", f"V4L2_WRIST_CONTRAST = {self.v4l2_contrast}", content)
+        content = re.sub(r"V4L2_WRIST_SATURATION\s*=\s*\d+", f"V4L2_WRIST_SATURATION = {self.v4l2_saturation}", content)
+
+        with open(env_cal_path, "w") as f:
+            f.write(content)
+        print(f"Successfully updated {env_cal_path} with current wrist camera settings!")
 
     def run(self):
         print("\nControls:")
         print("  p  - Print current camera parameters")
+        print("  c  - Save current parameters to env_cal.py")
         print("  r  - Move sim+real to rest pose")
         print("  s  - Move sim+real to start pose")
         print("  f  - Apply pending FOV change")
         print("  q  - Quit")
-        print("  Trackbars - Adjust X/Y/Z, Roll/Pitch/Yaw, FOV\n")
+        print("  Trackbars - Adjust X/Y/Z, Roll/Pitch/Yaw, FOV, Exposure, etc.\n")
 
         while True:
             self._update_camera()
@@ -314,6 +411,8 @@ class LiveCameraTuner:
                 break
             elif key == ord("p"):
                 self.print_params()
+            elif key == ord("c"):
+                self._save_to_env_cal()
             elif key == ord("r"):
                 try:
                     rest_qpos = self.sim_env.unwrapped.agent.keyframes["rest"].qpos

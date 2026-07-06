@@ -6,17 +6,20 @@ Changing values here will automatically update all environment files.
 import numpy as np
 
 # ==========================================
-# 🎨 COLOR SETTINGS (RGB format: 0.0 to 1.0)
+# 🎨 COLOR SETTINGS (RGB format: 0 to 255)
 # ==========================================
-ROBOT_COLOR = [0.1, 0.1, 0.1, 1.0]     # Black
-BLOCK_COLOR = [0.91, 1.0, 0.94]        # Minty-White
-TABLE_COLOR = [0.145, 0.624, 0.839, 1.0] # Blue
-BOX_COLOR   = [0.996, 0.918, 0.243, 1.0] # Yellow
+def rgb(r, g, b, a=255):
+    return [r/255.0, g/255.0, b/255.0, a/255.0]
+
+ROBOT_COLOR = rgb(25, 25, 25)          # Black
+BLOCK_COLOR = rgb(232, 255, 240)[:3]   # Minty-White (RGB only)
+TABLE_COLOR = rgb(20, 170, 217)        # Blue
+BOX_COLOR   = rgb(254, 234, 62)        # Yellow
 
 # ==========================================
 # 📷 WRIST CAMERA ALIGNMENT
 # ==========================================
-WRIST_CAMERA_BASE_POS = (-0.0110, 0.0520, -0.0520)
+WRIST_CAMERA_BASE_POS = (-0.0130, 0.0520, -0.0520)
 WRIST_CAMERA_BASE_ROT_RAD = (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0))
 WRIST_CAMERA_FOV = np.deg2rad(71.0)
 
@@ -30,11 +33,11 @@ OVERHEAD_CAMERA_FOV = np.deg2rad(60.0)
 # ==========================================
 # ⚙️ WRIST CAMERA HARDWARE V4L2 SETTINGS (/dev/video4)
 # ==========================================
-V4L2_WRIST_EXPOSURE = 243
+V4L2_WRIST_EXPOSURE = 143
 V4L2_WRIST_WB = 2800
-V4L2_WRIST_BRIGHTNESS = -10
-V4L2_WRIST_CONTRAST = 23
-V4L2_WRIST_SATURATION = 41
+V4L2_WRIST_BRIGHTNESS = -15
+V4L2_WRIST_CONTRAST = 20
+V4L2_WRIST_SATURATION = 46
 
 # ==========================================
 # ⚙️ OVERHEAD CAMERA HARDWARE V4L2 SETTINGS (/dev/video2)

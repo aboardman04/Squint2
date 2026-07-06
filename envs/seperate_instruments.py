@@ -246,7 +246,12 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         if action is not None and settling.any():
             if isinstance(action, torch.Tensor):
                 action = action.clone()
-                action[settling] = 0.0
+                if action.dim() == 1:
+                    action = action.unsqueeze(0)
+                    action[settling] = 0.0
+                    action = action.squeeze(0)
+                else:
+                    action[settling] = 0.0
             elif isinstance(action, np.ndarray):
                 action = action.copy()
                 # Use numpy indexing for numpy actions
@@ -254,7 +259,13 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                     settling_np = settling.cpu().numpy()
                 else:
                     settling_np = settling
-                action[settling_np] = 0.0
+                
+                if action.ndim == 1:
+                    action = np.expand_dims(action, 0)
+                    action[settling_np] = 0.0
+                    action = action[0]
+                else:
+                    action[settling_np] = 0.0
 
         if settling.any():
             vel1 = self.obj_1.linear_velocity.clone()
@@ -272,7 +283,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.obj_2.set_linear_velocity(vel2)
             self.obj_2.set_angular_velocity(avel2)
 
-        result = super().step(action)
+        result = DefaultCameraEnv.step(self, action)
 
         if settling.any():
             self.settle_steps[settling] += 1

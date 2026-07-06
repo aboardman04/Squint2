@@ -11,6 +11,10 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
 
+import torch
+if not torch.cuda.is_available():
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -20,7 +24,6 @@ import argparse
 
 import cv2
 import numpy as np
-import torch
 import gymnasium as gym
 import sapien
 from transforms3d.euler import euler2quat
