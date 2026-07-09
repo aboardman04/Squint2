@@ -10,3 +10,4 @@ import envs.place
 import envs.stack
 import envs.two_camera_lift
 import envs.seperate_instruments
+import envs.separate_instruments_2
