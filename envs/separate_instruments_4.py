@@ -1,6 +1,3 @@
-#This env has uptated rewards and penalties functions to reward looking at the 
-# instruments to make sure they are seperated and to penalize extreme movements
-
 from dataclasses import asdict, dataclass
 from typing import Any, Union, Optional, Sequence
 
@@ -39,7 +36,7 @@ class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
 
 
-@register_env("SeparateInstruments-v2", max_episode_steps=70)
+@register_env("SeparateInstruments-v4", max_episode_steps=70)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
@@ -291,7 +288,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.settle_steps[settling] += 1
             done_settling = (self.env_phase == 0) & (self.settle_steps >= settle_duration)
             
-        obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
             if done_settling.any():
                 dist = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
                 is_close = dist < 0.08
@@ -363,89 +359,86 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             tcp_pose=self.agent.tcp_pose.raw_pose,
         )
         if self.obs_mode_struct.state:
-            obs.update(cd 
+            obs.update(
                 obj_1_pose=self.obj_1.pose.raw_pose,
                 obj_2_pose=self.obj_2.pose.raw_pose, 
             )
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
-        # 1. Fixed Time Penalty
+        # 1. Fixed Time Penalty (0.0 while settling, -0.05 during active execution)
         reward = torch.full((self.num_envs,), -0.05, device=self.device)
-        
         if hasattr(self, "env_phase"):
             settling = self.env_phase == 0
             reward[settling] = 0.0
 
-        # 2. Reaching Reward
+        # Extract distances and velocities
         midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
         tcp_to_objs_dist = torch.linalg.norm(midpoint_objs - self.agent.tcp_pos, axis=1)
         
-        reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
-        reward += reaching_reward
-
-        # 3. Separation Reward
         distance_between_objs = torch.linalg.norm(
             self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
         )
         
-        target_separation = 0.20
-        is_separated = distance_between_objs > target_separation
-        
-        separation_reward = 3.0 * (1.0 - torch.tanh(3.0 * (target_separation - distance_between_objs)))
-        
-        arm_is_close = tcp_to_objs_dist < 0.15
-        reward += torch.where(arm_is_close, separation_reward, torch.zeros_like(reward))
+        vel1_mag = torch.linalg.norm(self.obj_1.linear_velocity, axis=1)
+        vel2_mag = torch.linalg.norm(self.obj_2.linear_velocity, axis=1)
+        instrument_speeds = vel1_mag + vel2_mag
 
-        # 4. Gaze/Looking Reward (Before & After Separation)
-        # Assumes a primary camera exists setup on the agent (e.g., self.cameras["base_camera"])
+        # 2. Reaching Reward (Guides the hand to the instruments)
+        reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
+        reward += reaching_reward
+
+        # 3. Gaze/Looking Reward (Always active to ensure visibility)
         if hasattr(self, "cameras") and len(self.cameras) > 0:
             cam = list(self.cameras.values())[0]
             cam_pose = cam.pose
+            cam_mat = cam_pose.to_transformation_matrix() 
+            cam_forward = cam_mat[:, :3, 2] 
             
-            # The forward looking vector in SAPIEN camera convention is usually local -X or +X depending on setup.
-            # Typically ManiSkill setups use quat_to_dir or raw rotation matrix calculations.
-            # Here we extract forward direction from the orientation quaternion matrix (Column 0 / Column 2 depending on setup)
-            # Assuming standard layout where forward vector can be calculated via transformation:
-            cam_mat = cam_pose.to_transformation_matrix() # Shape [B, 4, 4]
-            cam_forward = cam_mat[:, :3, 2] # Forward vector (Z-axis or X-axis depending on configuration)
-            
-            # Vector from camera to instruments midpoint
             cam_to_midpoint = midpoint_objs - cam_pose.p
             cam_to_midpoint = cam_to_midpoint / (torch.linalg.norm(cam_to_midpoint, axis=1, keepdim=True) + 1e-6)
             
-            # Gaze alignment score (1.0 if perfectly looking at them, 0.0 if orthogonal/away)
             gaze_alignment = torch.clamp(torch.sum(cam_forward * cam_to_midpoint, dim=1), min=0.0)
-            
-            # Phase-conditional looking reward scaling
-            # Looking reward is given throughout, but structured slightly differently based on separation
-            gaze_reward = torch.where(
-                is_separated,
-                1.5 * gaze_alignment,  # Post-separation verification looking reward
-                0.7 * gaze_alignment   # Pre-separation look-to-target tracking reward
-            )
-            reward += gaze_reward
+            reward += 1.5 * gaze_alignment
 
-        # 5. Anti-Flinging / Excessive Velocity Penalty
-        vel1_mag = torch.linalg.norm(self.obj_1.linear_velocity, axis=1)
-        vel2_mag = torch.linalg.norm(self.obj_2.linear_velocity, axis=1)
+        # 4. Controlled "Slow Pushing" Reward
+        # Reward active manipulation only if the robot is physically close
+        arm_is_close = tcp_to_objs_dist < 0.15
         
-        # Heavily penalize linear velocity magnitudes scaling exponentially past a threshold (e.g. > 0.5 m/s)
-        excessive_vel1 = torch.clamp(vel1_mag - 0.4, min=0.0)
-        excessive_vel2 = torch.clamp(vel2_mag - 0.4, min=0.0)
+        # Penalize fast movements dynamically: multiplier drops from 1.0 to 0.0 if speed exceeds 0.3 m/s
+        slow_control_multiplier = torch.clamp(1.0 - (instrument_speeds / 0.3), min=0.0, max=1.0)
         
-        velocity_penalty = 2.5 * (excessive_vel1 ** 2 + excessive_vel2 ** 2)
-        reward -= velocity_penalty
+        # Incremental pushing reward (encourages increasing separation up to a clear margin)
+        pushing_progress = torch.clamp(distance_between_objs, max=0.25)
+        slow_push_reward = 2.0 * pushing_progress * slow_control_multiplier
+        reward += torch.where(arm_is_close, slow_push_reward, torch.zeros_like(reward))
+
+        # 5. Non-Overlapping Proximity Optimization (The "Sweet Spot" Reward)
+        # Objects are overlapping/touching if closer than 0.08m (instrument size reference)
+        min_safe_separation = 0.08  
+        is_separated = distance_between_objs > min_safe_separation
+        
+        # Exponentially higher rewards the closer they are to 0.08m without crossing under it
+        # Peak value happens exactly at 0.081m and tapers off as they are pushed further away
+        proximity_reward = 5.0 * torch.exp(-8.0 * (distance_between_objs - min_safe_separation))
+        
+        # Apply proximity bonus ONLY if they are safely non-overlapping
+        reward += torch.where(is_separated, proximity_reward, torch.zeros_like(reward))
 
         # 6. Success Bonus
-        reward[info["success"]] = 10.0
+        reward[info["success"]] = 15.0
 
-        # 7. Operational Penalties
+        # 7. Operational Penalties (Severe penalty for slamming the table or flinging)
         if "robot_touching_table" in info:
             reward -= 2.0 * info["robot_touching_table"].float()
+            
+        excessive_vel1 = torch.clamp(vel1_mag - 0.4, min=0.0)
+        excessive_vel2 = torch.clamp(vel2_mag - 0.4, min=0.0)
+        reward -= 3.0 * (excessive_vel1 ** 2 + excessive_vel2 ** 2)
 
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 15.5 # Bumped slightly due to gaze updates
+        # Estimated maximum attainable baseline reward tracking
+        max_reward = 23.0 
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

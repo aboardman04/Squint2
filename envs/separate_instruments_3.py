@@ -1,5 +1,3 @@
-#This env has uptated rewards and penalties functions to reward looking at the 
-# instruments to make sure they are seperated and to penalize extreme movements
 
 from dataclasses import asdict, dataclass
 from typing import Any, Union, Optional, Sequence
@@ -39,7 +37,7 @@ class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
 
 
-@register_env("SeparateInstruments-v2", max_episode_steps=70)
+@register_env("SeparateInstruments-v3", max_episode_steps=50)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
@@ -291,7 +289,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.settle_steps[settling] += 1
             done_settling = (self.env_phase == 0) & (self.settle_steps >= settle_duration)
             
-        obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
             if done_settling.any():
                 dist = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
                 is_close = dist < 0.08
@@ -336,14 +333,46 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         return result
 
     def evaluate(self):
-        distance_between_objs = torch.linalg.norm(
-            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
-        )
-        is_separated = distance_between_objs > 0.20
+        # 1. Fallback if cameras aren't fully booted up during the first reset frame
+        if not hasattr(self, "cameras") or len(self.cameras) == 0:
+            return {
+                "success": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device), 
+                "robot_touching_table": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device),
+                "perceived_dist": torch.zeros(self.num_envs, device=self.device),
+                "both_visible": torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+            }
+
+        cam = list(self.cameras.values())[0]
+        cam_pose = cam.pose  # Batch of camera transformations [B, 7]
+        
+        # 2. Seamlessly transform World Poses to Camera-Relative Frames using ManiSkill's operator overloading
+        cam_pose_inv = cam_pose.inv()
+        p1_cam = (cam_pose_inv * self.obj_1.pose).p
+        p2_cam = (cam_pose_inv * self.obj_2.pose).p
+        
+        # 3. Standard Camera FOV check (-Z is forward direction)
+        in_front_1 = p1_cam[..., 2] < -0.05
+        in_front_2 = p2_cam[..., 2] < -0.05
+        
+        # Approximate a 90-degree conical or pyramidal FOV frustum
+        fov_check_1 = in_front_1 & (torch.abs(p1_cam[..., 0]) < torch.abs(p1_cam[..., 2])) & (torch.abs(p1_cam[..., 1]) < torch.abs(p1_cam[..., 2]))
+        fov_check_2 = in_front_2 & (torch.abs(p2_cam[..., 0]) < torch.abs(p2_cam[..., 2])) & (torch.abs(p2_cam[..., 1]) < torch.abs(p2_cam[..., 2]))
+        
+        both_visible = fov_check_1 & fov_check_2
+
+        # 4. Calculate perceived separation distance in 3D camera space
+        perceived_dist = torch.linalg.norm(p1_cam - p2_cam, axis=1)
+        target_separation = 0.20
+        
+        # Success criteria: separated AND inside the robot's active view field
+        visually_noticed_separation = both_visible & (perceived_dist > target_separation)
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
+        
         return {
-            "success": is_separated,
-            "robot_touching_table": robot_touching_table
+            "success": visually_noticed_separation,
+            "robot_touching_table": robot_touching_table,
+            "perceived_dist": perceived_dist,
+            "both_visible": both_visible
         }
 
     def _get_obs_agent(self):
@@ -363,81 +392,66 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             tcp_pose=self.agent.tcp_pose.raw_pose,
         )
         if self.obs_mode_struct.state:
-            obs.update(cd 
+            obs.update(
                 obj_1_pose=self.obj_1.pose.raw_pose,
                 obj_2_pose=self.obj_2.pose.raw_pose, 
             )
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
-        # 1. Fixed Time Penalty
+        # 1. Base step heartbeat penalty
         reward = torch.full((self.num_envs,), -0.05, device=self.device)
         
         if hasattr(self, "env_phase"):
             settling = self.env_phase == 0
             reward[settling] = 0.0
 
-        # 2. Reaching Reward
+        # 2. Distance-to-target tracking (Midpoint)
         midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
         tcp_to_objs_dist = torch.linalg.norm(midpoint_objs - self.agent.tcp_pos, axis=1)
-        
         reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
         reward += reaching_reward
 
-        # 3. Separation Reward
-        distance_between_objs = torch.linalg.norm(
-            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
-        )
+        # 3. Visually Conditioned Separation Reward
+        perceived_dist = info.get("perceived_dist", torch.zeros_like(reward))
+        both_visible = info.get("both_visible", torch.zeros_like(reward, dtype=torch.bool))
         
         target_separation = 0.20
-        is_separated = distance_between_objs > target_separation
+        separation_reward = 3.0 * (1.0 - torch.tanh(3.0 * (target_separation - perceived_dist)))
         
-        separation_reward = 3.0 * (1.0 - torch.tanh(3.0 * (target_separation - distance_between_objs)))
-        
+        # Kill the separation reward if the agent chooses to look away from the workspace!
         arm_is_close = tcp_to_objs_dist < 0.15
-        reward += torch.where(arm_is_close, separation_reward, torch.zeros_like(reward))
+        reward += torch.where(arm_is_close & both_visible, separation_reward, torch.zeros_like(reward))
 
-        # 4. Gaze/Looking Reward (Before & After Separation)
-        # Assumes a primary camera exists setup on the agent (e.g., self.cameras["base_camera"])
+        # 4. Gaze/Looking Alignment Reward
         if hasattr(self, "cameras") and len(self.cameras) > 0:
             cam = list(self.cameras.values())[0]
             cam_pose = cam.pose
             
-            # The forward looking vector in SAPIEN camera convention is usually local -X or +X depending on setup.
-            # Typically ManiSkill setups use quat_to_dir or raw rotation matrix calculations.
-            # Here we extract forward direction from the orientation quaternion matrix (Column 0 / Column 2 depending on setup)
-            # Assuming standard layout where forward vector can be calculated via transformation:
-            cam_mat = cam_pose.to_transformation_matrix() # Shape [B, 4, 4]
-            cam_forward = cam_mat[:, :3, 2] # Forward vector (Z-axis or X-axis depending on configuration)
+            cam_mat = cam_pose.to_transformation_matrix() 
+            cam_forward = -cam_mat[:, :3, 2] # Matrix look vector points down negative Z
             
-            # Vector from camera to instruments midpoint
             cam_to_midpoint = midpoint_objs - cam_pose.p
             cam_to_midpoint = cam_to_midpoint / (torch.linalg.norm(cam_to_midpoint, axis=1, keepdim=True) + 1e-6)
             
-            # Gaze alignment score (1.0 if perfectly looking at them, 0.0 if orthogonal/away)
             gaze_alignment = torch.clamp(torch.sum(cam_forward * cam_to_midpoint, dim=1), min=0.0)
             
-            # Phase-conditional looking reward scaling
-            # Looking reward is given throughout, but structured slightly differently based on separation
             gaze_reward = torch.where(
-                is_separated,
-                1.5 * gaze_alignment,  # Post-separation verification looking reward
-                0.7 * gaze_alignment   # Pre-separation look-to-target tracking reward
+                info["success"],
+                2.0 * gaze_alignment,  
+                0.7 * gaze_alignment   
             )
             reward += gaze_reward
 
-        # 5. Anti-Flinging / Excessive Velocity Penalty
+        # 5. Excessive Velocity Guardrails
         vel1_mag = torch.linalg.norm(self.obj_1.linear_velocity, axis=1)
         vel2_mag = torch.linalg.norm(self.obj_2.linear_velocity, axis=1)
-        
-        # Heavily penalize linear velocity magnitudes scaling exponentially past a threshold (e.g. > 0.5 m/s)
         excessive_vel1 = torch.clamp(vel1_mag - 0.4, min=0.0)
         excessive_vel2 = torch.clamp(vel2_mag - 0.4, min=0.0)
-        
         velocity_penalty = 2.5 * (excessive_vel1 ** 2 + excessive_vel2 ** 2)
         reward -= velocity_penalty
 
-        # 6. Success Bonus
+        # 6. Task Complete Verification Bonus
         reward[info["success"]] = 10.0
 
         # 7. Operational Penalties
@@ -447,5 +461,5 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 15.5 # Bumped slightly due to gaze updates
+        max_reward = 15.5 
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward

@@ -1,0 +1,12 @@
+# Blender 5.1.2 MTL File: 'scalpel_handle.blend'
+# www.blender.org
+
+newmtl Steel_Stainlessl_Shiny_instruments
+Ns 757.923889
+Ka 1.000000 1.000000 1.000000
+Kd 0.441221 0.441221 0.441221
+Ks 0.500000 0.500000 0.500000
+Ke 0.000000 0.000000 0.000000
+Ni 1.450000
+d 1.000000
+illum 3

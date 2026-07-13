@@ -39,7 +39,7 @@ class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
 
 
-@register_env("SeparateInstruments-v2", max_episode_steps=70)
+@register_env("SeparateInstruments-v2.5", max_episode_steps=50)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
@@ -142,7 +142,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         builder1.add_multiple_convex_collisions_from_file(
             filename=obj_path, decomposition="coacd", material=physx_material
         ) 
-        builder1.initial_pose = sapien.Pose(p=[-0.1, 0.0, 0.1], q=[1, 0, 0, 0])
+        builder1.initial_pose = sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 0, 0, 0])
         self.obj_1 = builder1.build(name="forceps_1")
 
         # --- Forceps 2 ---
@@ -151,13 +151,33 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         builder2.add_multiple_convex_collisions_from_file(
             filename=obj_path, decomposition="coacd", material=physx_material
         )
-        builder2.initial_pose = sapien.Pose(p=[0.1, 0.0, 0.1])
+        builder2.initial_pose = sapien.Pose(p=[0.1, -0.05, 0.1])
         self.obj_2 = builder2.build(name="forceps_2")
+
+        # --- Forceps 3 (UPDATED) ---
+        builder3 = self.scene.create_actor_builder()
+        builder3.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder3.add_multiple_convex_collisions_from_file(
+            filename=obj_path, decomposition="coacd", material=physx_material
+        )
+        builder3.initial_pose = sapien.Pose(p=[-0.1, 0.05, 0.1])
+        self.obj_3 = builder3.build(name="forceps_3")
+
+        # --- Forceps 4 (UPDATED) ---
+        builder4 = self.scene.create_actor_builder()
+        builder4.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder4.add_multiple_convex_collisions_from_file(
+            filename=obj_path, decomposition="coacd", material=physx_material
+        )
+        builder4.initial_pose = sapien.Pose(p=[0.1, 0.05, 0.1])
+        self.obj_4 = builder4.build(name="forceps_4")
 
         if self.apply_greenscreen:
             self.remove_object_from_greenscreen(self.agent.robot)
             self.remove_object_from_greenscreen(self.obj_1)
             self.remove_object_from_greenscreen(self.obj_2)
+            self.remove_object_from_greenscreen(self.obj_3)
+            self.remove_object_from_greenscreen(self.obj_4)
 
         if self.rest_qpos is not None:
             self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
@@ -170,6 +190,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         self._randomize_robot_color()
 
     def _sample_instrument_poses(self, b: int, base_pos: torch.Tensor):
+        # Sample for base instrument 1
         xyz_1 = torch.zeros((b, 3), device=self.device)
         xyz_1[:, :2] = (
             torch.rand((b, 2), device=self.device) * self.spawn_box_half_size * 2
@@ -178,28 +199,43 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         xyz_1[:, :2] += base_pos[:, :2]
         xyz_1[..., 2] = 0.008
 
+        # Create localized directional anchors for the other 3 objects
         yaw1 = torch.rand(b, device=self.device) * 2 * torch.pi
-        yaw2 = yaw1 + (torch.rand(b, device=self.device) - 0.5) * 0.1
+        
+        def make_quat(yaw_angles):
+            q = torch.zeros((b, 4), device=self.device)
+            q[:, 0] = torch.cos(yaw_angles / 2)
+            q[:, 3] = torch.sin(yaw_angles / 2)
+            return q
 
-        q1 = torch.zeros((b, 4), device=self.device)
-        q1[:, 0] = torch.cos(yaw1 / 2)
-        q1[:, 3] = torch.sin(yaw1 / 2)
-
-        q2 = torch.zeros((b, 4), device=self.device)
-        q2[:, 0] = torch.cos(yaw2 / 2)
-        q2[:, 3] = torch.sin(yaw2 / 2)
+        q1 = make_quat(yaw1)
+        q2 = make_quat(yaw1 + (torch.rand(b, device=self.device) - 0.5) * 0.1)
+        q3 = make_quat(yaw1 + (torch.rand(b, device=self.device) - 0.5) * 0.2)
+        q4 = make_quat(yaw1 + (torch.rand(b, device=self.device) - 0.5) * 0.3)
 
         perp_dir = torch.stack([-torch.sin(yaw1), torch.cos(yaw1)], dim=1)
         par_dir = torch.stack([torch.cos(yaw1), torch.sin(yaw1)], dim=1)
 
-        side_dist = (torch.rand(b, device=self.device) * 0.01 + 0.01) * torch.sign(torch.randn(b, device=self.device))
-        fwd_dist = (torch.rand(b, device=self.device) - 0.5) * 0.10
-
+        # Distribute the other 3 items relative to the first anchor
         xyz_2 = xyz_1.clone()
-        xyz_2[:, :2] += perp_dir * side_dist.unsqueeze(1) + par_dir * fwd_dist.unsqueeze(1)
+        side_dist2 = (torch.rand(b, device=self.device) * 0.01 + 0.01) * torch.sign(torch.randn(b, device=self.device))
+        fwd_dist2 = (torch.rand(b, device=self.device) - 0.5) * 0.10
+        xyz_2[:, :2] += perp_dir * side_dist2.unsqueeze(1) + par_dir * fwd_dist2.unsqueeze(1)
         xyz_2[..., 2] = 0.008
+
+        xyz_3 = xyz_1.clone()
+        side_dist3 = (torch.rand(b, device=self.device) * 0.01 + 0.02) * torch.sign(torch.randn(b, device=self.device))
+        fwd_dist3 = (torch.rand(b, device=self.device) - 0.5) * 0.10
+        xyz_3[:, :2] += perp_dir * side_dist3.unsqueeze(1) + par_dir * fwd_dist3.unsqueeze(1)
+        xyz_3[..., 2] = 0.008
+
+        xyz_4 = xyz_1.clone()
+        side_dist4 = (torch.rand(b, device=self.device) * 0.01 + 0.03) * torch.sign(torch.randn(b, device=self.device))
+        fwd_dist4 = (torch.rand(b, device=self.device) - 0.5) * 0.10
+        xyz_4[:, :2] += perp_dir * side_dist4.unsqueeze(1) + par_dir * fwd_dist4.unsqueeze(1)
+        xyz_4[..., 2] = 0.008
         
-        return xyz_1, q1, xyz_2, q2
+        return xyz_1, q1, xyz_2, q2, xyz_3, q3, xyz_4, q4
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
@@ -220,10 +256,12 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                 [self.spawn_box_pos[0], self.spawn_box_pos[1], 0]
             )
 
-            # 1. Sample and set poses for Forceps
-            p1, q1, p2, q2 = self._sample_instrument_poses(b, spawn_box_pos_tensor[env_idx])
+            # Sample and set poses for all 4 Forceps
+            p1, q1, p2, q2, p3, q3, p4, q4 = self._sample_instrument_poses(b, spawn_box_pos_tensor[env_idx])
             self.obj_1.set_pose(Pose.create_from_pq(p=p1, q=q1))
             self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
+            self.obj_3.set_pose(Pose.create_from_pq(p=p3, q=q3))
+            self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
 
             if not hasattr(self, "env_phase"):
                 self.env_phase = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
@@ -257,10 +295,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                     action[settling] = 0.0
             elif isinstance(action, np.ndarray):
                 action = action.copy()
-                if isinstance(settling, torch.Tensor):
-                    settling_np = settling.cpu().numpy()
-                else:
-                    settling_np = settling
+                settling_np = settling.cpu().numpy() if isinstance(settling, torch.Tensor) else settling
                 
                 if action.ndim == 1:
                     action = np.expand_dims(action, 0)
@@ -270,20 +305,14 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                     action[settling_np] = 0.0
 
         if settling.any():
-            vel1 = self.obj_1.linear_velocity.clone()
-            avel1 = self.obj_1.angular_velocity.clone()
-            vel2 = self.obj_2.linear_velocity.clone()
-            avel2 = self.obj_2.angular_velocity.clone()
-            
-            vel1[settling] *= 0.1
-            avel1[settling] *= 0.1
-            vel2[settling] *= 0.1
-            avel2[settling] *= 0.1
-            
-            self.obj_1.set_linear_velocity(vel1)
-            self.obj_1.set_angular_velocity(avel1)
-            self.obj_2.set_linear_velocity(vel2)
-            self.obj_2.set_angular_velocity(avel2)
+            # Update velocity damping across all 4 bodies
+            for obj in [self.obj_1, self.obj_2, self.obj_3, self.obj_4]:
+                vel = obj.linear_velocity.clone()
+                avel = obj.angular_velocity.clone()
+                vel[settling] *= 0.1
+                avel[settling] *= 0.1
+                obj.set_linear_velocity(vel)
+                obj.set_angular_velocity(avel)
 
         result = DefaultCameraEnv.step(self, action)
 
@@ -291,10 +320,13 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.settle_steps[settling] += 1
             done_settling = (self.env_phase == 0) & (self.settle_steps >= settle_duration)
             
-        obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
             if done_settling.any():
-                dist = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
-                is_close = dist < 0.08
+                # Check maximum compaction during initialization between sequential clusters
+                d12 = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
+                d23 = torch.linalg.norm(self.obj_2.pose.p[..., :2] - self.obj_3.pose.p[..., :2], axis=1)
+                d34 = torch.linalg.norm(self.obj_3.pose.p[..., :2] - self.obj_4.pose.p[..., :2], axis=1)
+                
+                is_close = (d12 < 0.08) & (d23 < 0.08) & (d34 < 0.08)
                 
                 success_idx = done_settling & is_close
                 self.env_phase[success_idx] = 1
@@ -303,46 +335,44 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                 num_fail = fail_idx.sum().item()
                 if num_fail > 0:
                     reconfig_idxs = torch.where(fail_idx)[0]
-                    p1, q1, p2, q2 = self._sample_instrument_poses(num_fail, self.spawn_box_pos_tensor[reconfig_idxs])
+                    p1, q1, p2, q2, p3, q3, p4, q4 = self._sample_instrument_poses(num_fail, self.spawn_box_pos_tensor[reconfig_idxs])
                     
-                    full_p1 = self.obj_1.pose.p.clone()
-                    full_q1 = self.obj_1.pose.q.clone()
-                    full_p2 = self.obj_2.pose.p.clone()
-                    full_q2 = self.obj_2.pose.q.clone()
-                    
-                    full_p1[reconfig_idxs] = p1
-                    full_q1[reconfig_idxs] = q1
-                    full_p2[reconfig_idxs] = p2
-                    full_q2[reconfig_idxs] = q2
-                    
-                    self.obj_1.set_pose(Pose.create_from_pq(p=full_p1, q=full_q1))
-                    self.obj_2.set_pose(Pose.create_from_pq(p=full_p2, q=full_q2))
-                    
-                    vel1 = self.obj_1.linear_velocity.clone()
-                    avel1 = self.obj_1.angular_velocity.clone()
-                    vel2 = self.obj_2.linear_velocity.clone()
-                    avel2 = self.obj_2.angular_velocity.clone()
-                    vel1[reconfig_idxs] = 0.0
-                    avel1[reconfig_idxs] = 0.0
-                    vel2[reconfig_idxs] = 0.0
-                    avel2[reconfig_idxs] = 0.0
-                    self.obj_1.set_linear_velocity(vel1)
-                    self.obj_1.set_angular_velocity(avel1)
-                    self.obj_2.set_linear_velocity(vel2)
-                    self.obj_2.set_angular_velocity(avel2)
+                    def patch_tensor(obj, sampled_p, sampled_q):
+                        full_p = obj.pose.p.clone()
+                        full_q = obj.pose.q.clone()
+                        full_p[reconfig_idxs] = sampled_p
+                        full_q[reconfig_idxs] = sampled_q
+                        obj.set_pose(Pose.create_from_pq(p=full_p, q=full_q))
+                        
+                        v = obj.linear_velocity.clone()
+                        av = obj.angular_velocity.clone()
+                        v[reconfig_idxs] = 0.0
+                        av[reconfig_idxs] = 0.0
+                        obj.set_linear_velocity(v)
+                        obj.set_angular_velocity(av)
+
+                    patch_tensor(self.obj_1, p1, q1)
+                    patch_tensor(self.obj_2, p2, q2)
+                    patch_tensor(self.obj_3, p3, q3)
+                    patch_tensor(self.obj_4, p4, q4)
                     
                     self.settle_steps[fail_idx] = 0
 
         return result
 
     def evaluate(self):
-        distance_between_objs = torch.linalg.norm(
-            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
-        )
-        is_separated = distance_between_objs > 0.20
+        # Global success evaluates whether every separate pairing breaks the 0.20m boundary
+        poses = [self.obj_1.pose.p[..., :2], self.obj_2.pose.p[..., :2], self.obj_3.pose.p[..., :2], self.obj_4.pose.p[..., :2]]
+        all_separated = torch.tensor(True, device=self.device, dtype=torch.bool)
+        
+        for i in range(4):
+            for j in range(i + 1, 4):
+                dist = torch.linalg.norm(poses[i] - poses[j], axis=1)
+                all_separated = all_separated & (dist > 0.20)
+
         robot_touching_table = self.agent.is_touching(self.table_scene.table)
         return {
-            "success": is_separated,
+            "success": all_separated,
             "robot_touching_table": robot_touching_table
         }
 
@@ -363,89 +393,88 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             tcp_pose=self.agent.tcp_pose.raw_pose,
         )
         if self.obs_mode_struct.state:
-            obs.update(cd 
+            obs.update(
                 obj_1_pose=self.obj_1.pose.raw_pose,
                 obj_2_pose=self.obj_2.pose.raw_pose, 
+                obj_3_pose=self.obj_3.pose.raw_pose, 
+                obj_4_pose=self.obj_4.pose.raw_pose, 
             )
         return obs
 
     def compute_dense_reward(self, obs: Any, action: Array, info: dict):
         # 1. Fixed Time Penalty
         reward = torch.full((self.num_envs,), -0.05, device=self.device)
-        
         if hasattr(self, "env_phase"):
             settling = self.env_phase == 0
             reward[settling] = 0.0
 
-        # 2. Reaching Reward
-        midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p) / 2.0
+        # Calculate multi-body centroid
+        midpoint_objs = (self.obj_1.pose.p + self.obj_2.pose.p + self.obj_3.pose.p + self.obj_4.pose.p) / 4.0
         tcp_to_objs_dist = torch.linalg.norm(midpoint_objs - self.agent.tcp_pos, axis=1)
         
+        # Gather all distinct relative distance pairs
+        obj_poses = [self.obj_1.pose.p[..., :2], self.obj_2.pose.p[..., :2], self.obj_3.pose.p[..., :2], self.obj_4.pose.p[..., :2]]
+        pair_distances = []
+        for i in range(4):
+            for j in range(i + 1, 4):
+                pair_distances.append(torch.linalg.norm(obj_poses[i] - obj_poses[j], axis=1))
+
+        # Linear and angular velocity tracking across the cluster
+        vel_mags = [torch.linalg.norm(obj.linear_velocity, axis=1) for obj in [self.obj_1, self.obj_2, self.obj_3, self.obj_4]]
+        total_cluster_speed = sum(vel_mags)
+
+        # 2. Reaching Reward
         reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_objs_dist)
         reward += reaching_reward
 
-        # 3. Separation Reward
-        distance_between_objs = torch.linalg.norm(
-            self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1
-        )
-        
-        target_separation = 0.20
-        is_separated = distance_between_objs > target_separation
-        
-        separation_reward = 3.0 * (1.0 - torch.tanh(3.0 * (target_separation - distance_between_objs)))
-        
-        arm_is_close = tcp_to_objs_dist < 0.15
-        reward += torch.where(arm_is_close, separation_reward, torch.zeros_like(reward))
-
-        # 4. Gaze/Looking Reward (Before & After Separation)
-        # Assumes a primary camera exists setup on the agent (e.g., self.cameras["base_camera"])
+        # 3. Gaze/Looking Reward (Stays locked onto the 4-object cluster centroid)
         if hasattr(self, "cameras") and len(self.cameras) > 0:
             cam = list(self.cameras.values())[0]
             cam_pose = cam.pose
+            cam_mat = cam_pose.to_transformation_matrix() 
+            cam_forward = cam_mat[:, :3, 2] 
             
-            # The forward looking vector in SAPIEN camera convention is usually local -X or +X depending on setup.
-            # Typically ManiSkill setups use quat_to_dir or raw rotation matrix calculations.
-            # Here we extract forward direction from the orientation quaternion matrix (Column 0 / Column 2 depending on setup)
-            # Assuming standard layout where forward vector can be calculated via transformation:
-            cam_mat = cam_pose.to_transformation_matrix() # Shape [B, 4, 4]
-            cam_forward = cam_mat[:, :3, 2] # Forward vector (Z-axis or X-axis depending on configuration)
-            
-            # Vector from camera to instruments midpoint
             cam_to_midpoint = midpoint_objs - cam_pose.p
             cam_to_midpoint = cam_to_midpoint / (torch.linalg.norm(cam_to_midpoint, axis=1, keepdim=True) + 1e-6)
             
-            # Gaze alignment score (1.0 if perfectly looking at them, 0.0 if orthogonal/away)
             gaze_alignment = torch.clamp(torch.sum(cam_forward * cam_to_midpoint, dim=1), min=0.0)
-            
-            # Phase-conditional looking reward scaling
-            # Looking reward is given throughout, but structured slightly differently based on separation
-            gaze_reward = torch.where(
-                is_separated,
-                1.5 * gaze_alignment,  # Post-separation verification looking reward
-                0.7 * gaze_alignment   # Pre-separation look-to-target tracking reward
-            )
-            reward += gaze_reward
+            reward += 1.5 * gaze_alignment
 
-        # 5. Anti-Flinging / Excessive Velocity Penalty
-        vel1_mag = torch.linalg.norm(self.obj_1.linear_velocity, axis=1)
-        vel2_mag = torch.linalg.norm(self.obj_2.linear_velocity, axis=1)
+        # 4. Controlled "Slow Pushing" Reward (Evaluated across the total speed of all 4 parts)
+        arm_is_close = tcp_to_objs_dist < 0.15
+        slow_control_multiplier = torch.clamp(1.0 - (total_cluster_speed / 0.6), min=0.0, max=1.0)
         
-        # Heavily penalize linear velocity magnitudes scaling exponentially past a threshold (e.g. > 0.5 m/s)
-        excessive_vel1 = torch.clamp(vel1_mag - 0.4, min=0.0)
-        excessive_vel2 = torch.clamp(vel2_mag - 0.4, min=0.0)
+        # Reward increasing the mean separation distance across every pair configuration slowly
+        mean_separation = sum(pair_distances) / len(pair_distances)
+        pushing_progress = torch.clamp(mean_separation, max=0.25)
+        slow_push_reward = 2.0 * pushing_progress * slow_control_multiplier
+        reward += torch.where(arm_is_close, slow_push_reward, torch.zeros_like(reward))
+
+        # 5. Non-Overlapping Proximity Optimization (Multi-body Sweet Spot Matrix)
+        min_safe_separation = 0.08  
+        proximity_bonus_total = torch.zeros_like(reward)
         
-        velocity_penalty = 2.5 * (excessive_vel1 ** 2 + excessive_vel2 ** 2)
-        reward -= velocity_penalty
+        for dist in pair_distances:
+            is_separated = dist > min_safe_separation
+            # Accumulate reward points for each separate pair optimized to the proximity margin
+            pair_bonus = torch.exp(-8.0 * (dist - min_safe_separation))
+            proximity_bonus_total += torch.where(is_separated, pair_bonus, torch.zeros_like(reward))
+            
+        reward += (5.0 / 6.0) * proximity_bonus_total  # Normalized against the 6 unique pairing combinations
 
         # 6. Success Bonus
-        reward[info["success"]] = 10.0
+        reward[info["success"]] = 15.0
 
         # 7. Operational Penalties
         if "robot_touching_table" in info:
             reward -= 2.0 * info["robot_touching_table"].float()
+            
+        for vel in vel_mags:
+            excessive_vel = torch.clamp(vel - 0.4, min=0.0)
+            reward -= 3.0 * (excessive_vel ** 2)
 
         return reward
 
     def compute_normalized_dense_reward(self, obs: Any, action: Array, info: dict):
-        max_reward = 15.5 # Bumped slightly due to gaze updates
+        max_reward = 25.0 
         return self.compute_dense_reward(obs=obs, action=action, info=info) / max_reward
