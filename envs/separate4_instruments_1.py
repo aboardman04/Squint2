@@ -39,7 +39,7 @@ class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
 
 
-@register_env("SeparateInstruments-v2.5", max_episode_steps=50)
+@register_env("SeparateInstruments-v2.5", max_episode_steps=200)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     SUPPORTED_ROBOTS = ["so100", "so101", "panda", "fetch"]
@@ -120,9 +120,14 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
         self._color_table()
-        
-        #------ Build Instruments ------
+
+    #-------------------------------
+    #------ Build Instruments ------
+    #-------------------------------
+
         obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
+        obj2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
+
 
         steel_material = sapien.render.RenderMaterial(
             base_color=[0.44, 0.44, 0.44, 1.0], 
@@ -154,23 +159,23 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         builder2.initial_pose = sapien.Pose(p=[0.1, -0.05, 0.1])
         self.obj_2 = builder2.build(name="forceps_2")
 
-        # --- Forceps 3 (UPDATED) ---
+        # --- Allis 1 (UPDATED) ---
         builder3 = self.scene.create_actor_builder()
-        builder3.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder3.add_visual_from_file(filename=obj2_path, material=steel_material)
         builder3.add_multiple_convex_collisions_from_file(
-            filename=obj_path, decomposition="coacd", material=physx_material
+            filename=obj2_path, decomposition="coacd", material=physx_material
         )
         builder3.initial_pose = sapien.Pose(p=[-0.1, 0.05, 0.1])
-        self.obj_3 = builder3.build(name="forceps_3")
+        self.obj_3 = builder3.build(name="allis_1")
 
-        # --- Forceps 4 (UPDATED) ---
+        # --- Allis 2 (UPDATED) ---
         builder4 = self.scene.create_actor_builder()
-        builder4.add_visual_from_file(filename=obj_path, material=steel_material)
+        builder4.add_visual_from_file(filename=obj2_path, material=steel_material)
         builder4.add_multiple_convex_collisions_from_file(
-            filename=obj_path, decomposition="coacd", material=physx_material
+            filename=obj2_path, decomposition="coacd", material=physx_material
         )
         builder4.initial_pose = sapien.Pose(p=[0.1, 0.05, 0.1])
-        self.obj_4 = builder4.build(name="forceps_4")
+        self.obj_4 = builder4.build(name="allis_2")
 
         if self.apply_greenscreen:
             self.remove_object_from_greenscreen(self.agent.robot)
@@ -236,9 +241,18 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         xyz_4[..., 2] = 0.008
         
         return xyz_1, q1, xyz_2, q2, xyz_3, q3, xyz_4, q4
-
+    #setting up the instrument placement in the environment
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
+
+        # define spawn center
+        spawn_x = 0.0
+        spawn_y = 0.0
+
+        # 3. Spawn objects "on top of each other" by stacking their z-coordinates
+        # Adjust these height offsets depending on how many instruments there are
+        height_offsets = [0.15, 0.22, 0.29, 0.36]  # Meters above the table surface
+
         with torch.device(self.device):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
@@ -280,7 +294,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.spawn_box_pos_tensor = self.agent.robot.pose.p + torch.tensor(
                 [self.spawn_box_pos[0], self.spawn_box_pos[1], 0], device=self.device
             )
-
+        #buffer time to let the istruments settle when the environment is set
         settle_duration = 5
         settling = self.env_phase == 0
 
@@ -378,6 +392,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
+        # add randomization/noise to the simulation to help with sim to real conversion
         if self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0:
             noise = torch.randn_like(qpos) * self.domain_randomization_config.robot_qpos_noise_std
             qpos = qpos + noise

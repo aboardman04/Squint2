@@ -1,10 +1,10 @@
 import gymnasium as gym
 import mani_skill.envs
-from envs.seperate_instruments import SeparateInstrumentsEnv
+from envs.separate4_instruments_1 import SeparateInstrumentsEnv
 import torch
 from mani_skill.utils.structs.pose import Pose
 
-env = gym.make("SeparateInstruments-v1", num_envs=4)
+env = gym.make("SeparateInstruments-v2.5", num_envs=4)
 env.reset()
 
 pose = env.unwrapped.obj_1.pose

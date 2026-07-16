@@ -291,7 +291,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.settle_steps[settling] += 1
             done_settling = (self.env_phase == 0) & (self.settle_steps >= settle_duration)
             
-        obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
             if done_settling.any():
                 dist = torch.linalg.norm(self.obj_1.pose.p[..., :2] - self.obj_2.pose.p[..., :2], axis=1)
                 is_close = dist < 0.08
@@ -363,7 +362,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             tcp_pose=self.agent.tcp_pose.raw_pose,
         )
         if self.obs_mode_struct.state:
-            obs.update(cd 
+            obs.update(
                 obj_1_pose=self.obj_1.pose.raw_pose,
                 obj_2_pose=self.obj_2.pose.raw_pose, 
             )

@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import numpy as np
 import time
 
@@ -28,8 +28,8 @@ def main():
         env = gym.make(
             env_id,
             render_mode="human",
-            obs_mode="rgbd",  # Ensure camera visual outputs are initialized
-            control_mode="pd_joint_delta"  # Standard robot arm control mode
+            obs_mode="rgb",  # Ensure camera visual outputs are initialized
+            control_mode="pd_joint_delta_pos"  # Standard robot arm control mode
         )
     except Exception as e:
         print(f"Failed to load environment '{env_id}'. Error details:\n", e)
@@ -59,7 +59,11 @@ def main():
             obs, reward, terminated, truncated, info = env.step(action)
             
             # Render the environment (ManiSkill updates the human GUI viewer automatically here)
-            env.render()
+            try:
+                env.render()
+            except AttributeError:
+                print("Viewer window closed or not available.")
+                break
             
             # Slightly slow down execution so you can visually parse the actions
             time.sleep(0.05)
