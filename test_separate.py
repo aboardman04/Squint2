@@ -18,7 +18,7 @@ except ImportError as e:
 
 def main():
     # The registered name of your separate instruments environment
-    env_id = "SeparateInstruments-v2.5"
+    env_id = "SeparateInstruments-v5"
     
     print(f"Creating environment: {env_id}...")
     

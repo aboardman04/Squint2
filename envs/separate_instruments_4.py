@@ -61,10 +61,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         **kwargs,
     ):
         # Robot-specific configuration
-        if robot_uids == "so100":
-            self.base_z_rot = np.pi / 2
-            self.rest_qpos = [0, 0, 0, np.pi / 2, np.pi / 2, 0]
-        elif robot_uids == "so101":
+        if robot_uids == "so101":
             self.base_z_rot = 0
             self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
         else:
