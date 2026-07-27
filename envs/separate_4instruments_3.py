@@ -21,7 +21,7 @@ from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 from .robot.so101 import SO101
 
 
-@register_env("SeparateInstruments-v5", max_episode_steps=500)
+@register_env("SeparateInstruments-v6", max_episode_steps=500)
 class SeparateInstrumentsEnv(DefaultCameraEnv):
     
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
@@ -90,6 +90,45 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         # set a reasonable initial pose for the agent that doesn't intersect other objects
         super()._load_agent(options, sapien.Pose(p=[-0.615, 0, 0]))
 
+    # def _build_bin(self, radius):
+    #     builder = self.scene.create_actor_builder()
+
+    #     # init the locations of the basic blocks
+    #     dx = self.block_half_size[1] - self.block_half_size[0]
+    #     dy = self.block_half_size[1] - self.block_half_size[0]
+    #     dz = self.edge_block_half_size[2] + self.block_half_size[0]
+
+    #     # build the bin bottom and edge blocks
+    #     poses = [
+    #         sapien.Pose([0, 0, 0]),
+    #         sapien.Pose([-dx, 0, dz]),
+    #         sapien.Pose([dx, 0, dz]),
+    #         sapien.Pose([0, -dy, dz]),
+    #         sapien.Pose([0, dy, dz]),
+    #     ]
+    #     half_sizes = [
+    #         [self.block_half_size[1], self.block_half_size[2], self.block_half_size[0]],
+    #         self.edge_block_half_size,
+    #         self.edge_block_half_size,
+    #         [
+    #             self.edge_block_half_size[1],
+    #             self.edge_block_half_size[0],
+    #             self.edge_block_half_size[2],
+    #         ],
+    #         [
+    #             self.edge_block_half_size[1],
+    #             self.edge_block_half_size[0],
+    #             self.edge_block_half_size[2],
+    #         ],
+    #     ]
+    #     for pose, half_size in zip(poses, half_sizes):
+    #         builder.add_box_collision(pose, half_size)
+    #         builder.add_box_visual(pose, half_size)
+
+    #     # build the kinematic bin
+    #     return builder.build_kinematic(name="bin")
+
+
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
         steel_material = sapien.render.RenderMaterial(
             base_color=[0.44, 0.44, 0.44, 1.0],
@@ -135,14 +174,21 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         )
         self.table_scene.build()
 
-        # add a thin colored mat on top of the table to change its surface color
+        # Create a thin blue mat on the table surface
         blue_material = sapien.render.RenderMaterial(
             base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0
         )
-        self.table_mat_half_size = [0.40, 0.80, 0.001]
+        patch_half_size = [0.20, 0.375, 0.002]
+        table_z = (
+            self.table_scene.table.pose.p[2]
+            if hasattr(self.table_scene, "table")
+            else float(self.block_half_size[2])
+        )
         builder = self.scene.create_actor_builder()
-        builder.add_box_visual(half_size=self.table_mat_half_size, material=blue_material)
-        builder.initial_pose = sapien.Pose()
+        builder.add_box_visual(half_size=patch_half_size, material=blue_material)
+        builder.initial_pose = sapien.Pose(
+            p=[0.20, 0.225, table_z + patch_half_size[2]], q=[1, 0, 0, 0]
+        )
         self.table_mat = builder.build_kinematic("table_mat")
 
         # Create camera mount actors expected by the base randomization helpers.
@@ -154,9 +200,14 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         builder.initial_pose = sapien.Pose()
         self.wrist_camera_mount = builder.build_kinematic("wrist_camera_mount")
 
-        # Create bin
+        #self.bin = self._build_bin(self.radius)
         bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/box.obj"
+        # compute a quaternion so the box's open side faces up and the long side
+        # is rotated to be perpendicular to the robot-forward direction.
+        # Tweak these Euler angles if the model's axes differ.
+        # (roll, pitch, yaw) where yaw=pi/2 aligns the long axis along +Y.
         bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
+        # build the bin as a kinematic actor so it won't be pushed or fly
         bin_steel_material = sapien.render.RenderMaterial(
             base_color=[0.831, 0.827, 0.800, 1.0], roughness=0.15, metallic=1.0
         )
@@ -168,10 +219,11 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         builder.add_multiple_convex_collisions_from_file(
             filename=bin_path, decomposition="coacd", material=physx_material
         )
+        # set initial pose so the bin sits on the table (center z = half-height)
+        # place initial builder pose slightly lower so the bin base rests on table
         builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
         self.bin = builder.build_kinematic("bin")
 
-        # Create Instruments
         inst1_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
         inst2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
         self.obj_1 = self._build_instrument(
@@ -202,24 +254,13 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
 
-            # position the table mat after the table pose is finalized
-            if hasattr(self.table_scene, "table"):
-                table_z = self.table_scene.table.pose.p[..., 2]
-                if table_z.ndim == 0:
-                    table_z = table_z.unsqueeze(0)
-                # table pose is the table body reference, so add the top-surface offset
-                table_z = table_z + 0.92
-            else:
-                table_z = torch.full((b,), float(self.block_half_size[2]) + 0.92, device=self.device)
-            mat_pos = torch.zeros((b, 3), device=self.device)
-            mat_pos[:, 0] = -0.250
-            mat_pos[:, 1] = -0.275
-            mat_pos[:, 2] = table_z + float(self.table_mat_half_size[2])
-            mat_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(b, 1)
-            self.table_mat.set_pose(Pose.create_from_pq(p=mat_pos, q=mat_q))
-
             center = self.agent.robot.pose.p + torch.tensor([0.3, 0.0, 0.0], device=self.device)
-            center = center[env_idx]
+            if center.ndim == 1:
+                center = center.unsqueeze(0)
+            if center.shape[0] == 1:
+                center = center.expand(len(env_idx), -1)
+            else:
+                center = center[env_idx]
             # place the bin first so instruments can be spawned relative to it
             bin_pos = center.clone()
             # lower the bin slightly so its bottom should touch the table
@@ -240,6 +281,20 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             self.obj_3.set_pose(Pose.create_from_pq(p=p3, q=q3))
             self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
             self.obj = self.obj_1
+
+    # def _get_obs_extra(self, info: dict):
+    #     obs = dict(
+    #         tcp_pose=self.agent.tcp_pose.raw_pose,
+    #     )
+    #     if self.obs_mode_struct.use_state:
+    #         obs.update(
+    #             goal_pos=self.goal_region.pose.p,
+    #             obj_1_pose=self.obj_1.pose.raw_pose,
+    #             obj_2_pose=self.obj_2.pose.raw_pose,
+    #             obj_3_pose=self.obj_3.pose.raw_pose,
+    #             obj_4_pose=self.obj_4.pose.raw_pose,
+    #         )
+    #     return obs
 
     def evaluate(self):
         # Extract XY positions for all instruments
