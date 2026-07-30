@@ -18,8 +18,8 @@ except ImportError as e:
 
 def main():
     # The registered name of your separate instruments environment
-    env_id = "SeparateInstruments-v5"
-    
+    env_id = "SeparateInstruments-v6"
+ #"SO101LiftCube-v1"#   
     print(f"Creating environment: {env_id}...")
     
     # Create the environment.
@@ -29,7 +29,9 @@ def main():
             env_id,
             render_mode="human",
             obs_mode="rgb",  # Ensure camera visual outputs are initialized
-            control_mode="pd_joint_delta_pos"  # Standard robot arm control mode
+            control_mode="pd_joint_delta_pos",  # Standard robot arm control mode
+            sim_backend="cpu",
+            render_backend="cpu"
         )
     except Exception as e:
         print(f"Failed to load environment '{env_id}'. Error details:\n", e)
