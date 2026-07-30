@@ -50,6 +50,9 @@ class Separate(DefaultCameraEnv):
     instrument_spawn_z_spacing = 0.007
     num_instruments = 4
     block_half_size = [0.0075, 0.085, 0.085]
+    DROP_LOCATION = np.array([0.25, -0.30, 0.01])
+    DROP_ZONE_HEIGHT = 0.15
+    DROP_ZONE_WIDTH = 0.20
 
     def __init__(
         self,
@@ -178,19 +181,52 @@ class Separate(DefaultCameraEnv):
             poses.extend([xyz, q])
         return tuple(poses)
 
+    def _build_drop_zone_outline(self, half_width: float, half_height: float, thickness: float = 0.0025):
+        """Creates a thin rectangular border marking the drop zone on the table surface."""
+        builder = self.scene.create_actor_builder()
+        green_material = sapien.render.RenderMaterial(
+            base_color=[0.0, 0.8, 0.2, 0.8],
+            roughness=0.1,
+            metallic=0.0
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, -half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[-half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.initial_pose = sapien.Pose()
+        return builder.build_kinematic("drop_zone_outline")
+
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(env=self, robot_init_qpos_noise=self.robot_init_qpos_noise)
         self.table_scene.build()
         self.table_pose = Pose.create_from_pq(p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2))
-
-        blue_material = sapien.render.RenderMaterial(
-            base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0
+        
+        self.drop_zone_visual = self._build_drop_zone_outline(
+            half_width=self.DROP_ZONE_WIDTH, 
+            half_height=self.DROP_ZONE_HEIGHT, 
+            thickness=0.0025
         )
+
+        blue_material = sapien.render.RenderMaterial(base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0)
         self.table_mat_half_size = [0.40, 0.80, 0.001]
         builder = self.scene.create_actor_builder()
-        builder.add_box_visual(
-            half_size=self.table_mat_half_size, material=blue_material
-        )
+        builder.add_box_visual(half_size=self.table_mat_half_size, material=blue_material)
         builder.initial_pose = sapien.Pose()
         self.table_mat = builder.build_kinematic("table_mat")
 
@@ -277,6 +313,10 @@ class Separate(DefaultCameraEnv):
             self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
             self.obj = self.obj_1
 
+            drop_pos = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32).repeat(b, 1)
+            drop_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(b, 1)
+            self.drop_zone_visual.set_pose(Pose.create_from_pq(p=drop_pos, q=drop_q))
+
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
         if (self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0):
@@ -318,7 +358,7 @@ class Separate(DefaultCameraEnv):
     def _get_obs_extra(self, info: dict):
         obs = dict(tcp_pose=self.agent.tcp_pose.raw_pose)
 
-        DROP_LOCATION = torch.tensor([0.45, 0.20, 0.02], device=self.device)
+        DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
 
         gripper_to_bin = self.compute_gripper_to_bin_clearance()
         gripper_to_table = self.compute_gripper_to_table_clearance()
@@ -431,7 +471,7 @@ class Separate(DefaultCameraEnv):
 
     def compute_dense_reward(self, obs: Any, action: Any, info: dict):
         reward = torch.zeros((self.num_envs,), device=self.device)
-        DROP_LOCATION = torch.tensor([0.45, 0.20, 0.02], device=self.device)
+        DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
 
         batch_idx = torch.arange(self.num_envs, device=self.device)
 
