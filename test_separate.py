@@ -18,7 +18,7 @@ except ImportError as e:
 
 def main():
     # The registered name of your separate instruments environment
-    env_id = 'SeparateInstruments-v6'
+    env_id = 'SeparateInstruments-v5'
     #"SeparateInstruments-v5"
  #"SO101LiftCube-v1"#   
     print(f"Creating environment: {env_id}...")
@@ -47,6 +47,11 @@ def main():
     obs, info = env.reset()
     print("Environment successfully loaded and reset!")
     print(f"Observation keys: {obs.keys() if hasattr(obs, 'keys') else 'Array'}")
+    
+    print(obs.keys())
+    print(obs["sensor_data"].keys())
+    print(obs["sensor_data"]["base_camera"].keys())
+    print(cam_xyz.p[0])
 
     print("\n--- Visualizer Running ---")
     print("Click inside the simulator GUI window to interact with the 3D scene.")
