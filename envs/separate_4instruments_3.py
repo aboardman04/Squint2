@@ -22,7 +22,7 @@ from .robot.so101 import SO101
 
 
 @dataclass
-class SeparateRandomizationConfig(DefaultRandomizationConfig):
+class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
     item_friction_range: Sequence[float] = (0.1, 0.5)
     item_density_range: Sequence[float] = (200, 200)
@@ -30,7 +30,7 @@ class SeparateRandomizationConfig(DefaultRandomizationConfig):
 
 
 @register_env("SeparateInstruments-v5", max_episode_steps=500)
-class Separate(DefaultCameraEnv):
+class SeparateInstrumentsEnv(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
         "none",

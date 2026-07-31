@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Any, Sequence, Union
+from dataclasses import asdict, dataclass
+from typing import Any, Optional, Sequence, Union
 
 import dacite
 import numpy as np
@@ -69,7 +69,7 @@ class Separate(DefaultCameraEnv):
         self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
 
         self.domain_randomization_config = SeparateRandomizationConfig()
-        merged_domain_randomization_config = (self.domain_randomization_config.dict())
+        merged_domain_randomization_config = self.domain_randomization_config.dict()
         if isinstance(domain_randomization_config, dict):
             common.dict_merge(merged_domain_randomization_config, domain_randomization_config)
             self.domain_randomization_config = dacite.from_dict(
@@ -83,6 +83,7 @@ class Separate(DefaultCameraEnv):
         super().__init__(
             *args,
             robot_uids=robot_uids,
+            control_mode=control_mode,
             domain_randomization=domain_randomization,
             domain_randomization_config=self.domain_randomization_config,
             **kwargs,
@@ -94,43 +95,29 @@ class Separate(DefaultCameraEnv):
             gpu_memory_config=GPUMemoryConfig(found_lost_pairs_capacity=2**25, max_rigid_patch_count=2**18)
         )
 
-    @property
-    def _default_sensor_configs(self):
-        pose = sapien_utils.look_at(eye=[0.3, 0, 0.6], target=[-0.1, 0, 0.1])
-        return [
-            CameraConfig(
-                "base_camera",
-                pose=pose,
-                width=128,
-                height=128,
-                fov=np.pi / 2,
-                near=0.01,
-                far=100,
-            )
-        ]
-
-    @property
-    def _default_human_render_camera_configs(self):
-        pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
-        return CameraConfig(
-            "render_camera",
-            pose=pose,
-            width=512,
-            height=512,
-            fov=1,
-            near=0.01,
-            far=100,
-        )
+    # @property
+    # def _default_human_render_camera_configs(self):
+    #     pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
+    #     return CameraConfig(
+    #         "render_camera",
+    #         pose=pose,
+    #         width=512,
+    #         height=512,
+    #         fov=1,
+    #         near=0.01,
+    #         far=100,
+    #     )
 
     def _load_agent(self, options: dict):
-        # self._agent_init_pose = sapien.Pose(p=[-0.615, 0, 0])
-        # super()._load_agent(options)
-
+        # load the robot arm at this initial pose
         super()._load_agent(
             options,
             sapien.Pose(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot)),
+            build_separate=True
+            if self.domain_randomization
+            and self.domain_randomization_config.robot_color == "random"
+            else False,
         )
-
 
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
         steel_material = sapien.render.RenderMaterial(
@@ -213,14 +200,14 @@ class Separate(DefaultCameraEnv):
         return builder.build_kinematic("drop_zone_outline")
 
     def _load_scene(self, options: dict):
-        self.table_scene = TableSceneBuilder(env=self, robot_init_qpos_noise=self.robot_init_qpos_noise)
+        self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
         self.table_pose = Pose.create_from_pq(p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2))
         
         self.drop_zone_visual = self._build_drop_zone_outline(
             half_width=self.DROP_ZONE_WIDTH, 
             half_height=self.DROP_ZONE_HEIGHT, 
-            thickness=0.0025
+            thickness=0.00025
         )
 
         blue_material = sapien.render.RenderMaterial(base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0)
