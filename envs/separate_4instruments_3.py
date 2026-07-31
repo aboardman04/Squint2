@@ -430,11 +430,11 @@ class Separate(DefaultCameraEnv):
     def evaluate(self):
         poses_xy = [obj.pose.p[..., :2] for obj in self.objects]
 
-        all_separated = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        for i in range(self.num_instruments):
-            for j in range(i + 1, self.num_instruments):
-                dist = torch.linalg.norm(poses_xy[i] - poses_xy[j], dim=-1)
-                all_separated = all_separated & (dist > 0.15)
+        # all_separated = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        # for i in range(self.num_instruments):
+        #     for j in range(i + 1, self.num_instruments):
+        #         dist = torch.linalg.norm(poses_xy[i] - poses_xy[j], dim=-1)
+        #         all_separated = all_separated & (dist > 0.15)
 
         bin_xy = self.bin.pose.p[..., :2]
         if bin_xy.ndim == 1:
@@ -474,42 +474,47 @@ class Separate(DefaultCameraEnv):
         # Handle different obs dictionary structures (ManiSkill wraps extra info in "extra")
         obs_extra = obs["extra"] if "extra" in obs else obs
         target_idx = obs_extra["target_obj"]
-        target_visible = torch.stack(
-            [obs_extra[f"obj{i+1}_visible"] for i in range(len(self.objects))],
-            dim=1,
-        )[batch_idx, target_idx]
-
-        reward += 0.5 * target_visible
-
         target_grasped = torch.stack([obs_extra[f"obj{i+1}_grasped"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
         target_tcp_dist = torch.stack([obs_extra[f"obj{i+1}_distance_to_gripper"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
         target_nearest_collision = torch.stack([obs_extra[f"obj{i+1}_nearest_collision"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
 
+
+        if not target_grasped:
+
+            visibility_reward = (1 - torch.tanh(5 * target_tcp_dist)) * target_visible
+            reward = 0.5 * visibility_reward
+
+            reach_reward = (1 - torch.tanh(5 * target_tcp_dist))
+            reward += reach_reward
+
+
         # Penalizes getting dangerously close (< 2.0 integer clearance units) to table or bin
-        collision_safe_margin = 0.02
+        collision_safe_margin = 2.0
         collision_penalty = torch.clamp(collision_safe_margin - target_nearest_collision.float(), min=0.0)
         reward -= 0.5 * collision_penalty
 
         # Continuous reach reward (0 to 1) when not holding target
-        reach_reward = (1.0 - torch.tanh(5.0 * target_tcp_dist)) * (1.0 - target_grasped)
-        reward += 1.0 * reach_reward
-
         # High discrete reward for active target grasp
         reward += 2.5 * target_grasped
+
+        lift_height = torch.clamp(target_pos[:,2] - table_height, min=0)
+        lift_reward = (1 - torch.tanh(8*(0.08-lift_height)))
 
         # Distance from target object to desired drop location
         target_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1) 
         target_pos = target_obj_positions[batch_idx, target_idx]
         drop_dist = torch.linalg.norm(target_pos - DROP_LOCATION, dim=-1)
 
+        transport_reward = (1 - torch.tanh(3*drop_dist))
+
         # Continuous placement reward (strongest when grasped and moved toward target area)
-        placement_reward = (1.0 - torch.tanh(3.0 * drop_dist)) * target_grasped
-        reward += 4.0 * placement_reward
+        released = (in_drop_zone & (~target_grasped))
+        reward[released] = (7 + robot_static_reward)
 
         # Bonus for dropping/releasing target within drop zone threshold (< 0.05m)
-        in_drop_zone = (drop_dist < 0.05).float()
-        successful_placement = in_drop_zone * (1.0 - target_grasped)
-        reward += 10.0 * successful_placement
+        # in_drop_zone = (drop_dist < 0.05).float()
+        # successful_placement = in_drop_zone * (1.0 - target_grasped)
+        # reward += 10.0 * successful_placement
 
         # 5. Success Bonus
         reward[info["success"]] += 15.0

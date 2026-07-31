@@ -51,7 +51,6 @@ def main():
     print(obs.keys())
     print(obs["sensor_data"].keys())
     print(obs["sensor_data"]["base_camera"].keys())
-    print(cam_xyz.p[0])
 
     print("\n--- Visualizer Running ---")
     print("Click inside the simulator GUI window to interact with the 3D scene.")
