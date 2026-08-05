@@ -122,7 +122,7 @@ class Separate(DefaultCameraEnv):
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
         builder.add_multiple_convex_collisions_from_file(
             filename=obj_path,
-            decomposition="coacd",
+            #decomposition="coacd",
             material=physx_material,
         )
         builder.initial_pose = initial_pose
@@ -227,22 +227,22 @@ class Separate(DefaultCameraEnv):
         self.obj_1 = self._build_instrument(
             inst1_path,
             name="forceps_1",
-            initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[0, 0, 0, 0]),
         )
         self.obj_2 = self._build_instrument(
             inst1_path,
             name="forceps_2",
-            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1]),
+            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.2]),
         )
         self.obj_3 = self._build_instrument(
             inst2_path,
             name="allis_1",
-            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1]),
+            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.3]),
         )
         self.obj_4 = self._build_instrument(
             inst2_path,
             name="allis_2",
-            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1]),
+            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.4]),
         )
         self.objects = [self.obj_1, self.obj_2, self.obj_3, self.obj_4]
         self.obj = self.obj_1
@@ -403,11 +403,10 @@ class Separate(DefaultCameraEnv):
             grasped = self.agent.is_grasping(obj)
 
             tcp_dist = distances_tensor[i]
-            drop_distance = torch.linalg.norm(obj_pos - DROP_LOCATION, dim=-1)
+            drop_distance = torch.linalg.norm(obj_pos - DROP_LOCATION, dim=-1) # distance of grasped obj from drop location
 
-            grasped_bin_dist = torch.linalg.norm(obj.pose.p - self.bin.pose.p, dim=-1)
-            gripper_min_dist = torch.minimum(gripper_to_table, gripper_to_bin)
-
+            grasped_bin_dist = torch.linalg.norm(obj.pose.p - self.bin.pose.p, dim=-1) # distance from grasped obj to bin
+            gripper_min_dist = torch.minimum(gripper_to_table, gripper_to_bin) # min distance from gripper to bin or table
             nearest_collision_float = torch.where(grasped, grasped_bin_dist, gripper_min_dist)
             nearest_collision = nearest_collision_float.round().long()
 
@@ -481,7 +480,7 @@ class Separate(DefaultCameraEnv):
 
         if not target_grasped:
 
-            visibility_reward = (1 - torch.tanh(5 * target_tcp_dist)) * target_visible
+            visibility_reward = (1 - torch.tanh(5 * target_tcp_dist)) #* target_visible
             reward = 0.5 * visibility_reward
 
             reach_reward = (1 - torch.tanh(5 * target_tcp_dist))
@@ -497,19 +496,19 @@ class Separate(DefaultCameraEnv):
         # High discrete reward for active target grasp
         reward += 2.5 * target_grasped
 
-        lift_height = torch.clamp(target_pos[:,2] - table_height, min=0)
-        lift_reward = (1 - torch.tanh(8*(0.08-lift_height)))
-
         # Distance from target object to desired drop location
         target_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1) 
         target_pos = target_obj_positions[batch_idx, target_idx]
         drop_dist = torch.linalg.norm(target_pos - DROP_LOCATION, dim=-1)
 
+        # lift_height = torch.clamp(target_pos[:,2] - table_height, min=0)
+        # lift_reward = (1 - torch.tanh(8*(0.08-lift_height)))
+
         transport_reward = (1 - torch.tanh(3*drop_dist))
 
         # Continuous placement reward (strongest when grasped and moved toward target area)
-        released = (in_drop_zone & (~target_grasped))
-        reward[released] = (7 + robot_static_reward)
+        # released = (in_drop_zone & (~target_grasped))
+        # reward[released] = (7 + robot_static_reward)
 
         # Bonus for dropping/releasing target within drop zone threshold (< 0.05m)
         # in_drop_zone = (drop_dist < 0.05).float()
