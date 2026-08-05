@@ -401,6 +401,14 @@ class Separate(DefaultCameraEnv):
             target_obj_idx_closest,
         ).long()
 
+        # If every object is already completed / unavailable, clear the target
+        no_available_targets = (~available).all(dim=1)
+        self.target_obj_idx = torch.where(
+            no_available_targets,
+            torch.full_like(self.target_obj_idx, -1),
+            self.target_obj_idx,
+        )
+
     def _update_active_target(self):
         batch_idx = torch.arange(self.num_envs, device=self.device)
 
@@ -472,7 +480,12 @@ class Separate(DefaultCameraEnv):
                 torch.tensor(1.0, device=self.device), 
                 grasped_obj_touching_bin
             )
-
+        if any_grasped:
+            if not grasped_obj_touching_bin:
+                grasped_obj_lifted = True
+        else:
+            grasped_obj_lifted = False
+            
         # 5. Populate Cleaned Observation Dictionary
         obs.update({
             "instrument_distances": instrument_distances,      # [b, 4] tensor of distances
@@ -480,7 +493,9 @@ class Separate(DefaultCameraEnv):
             "is_any_grasped": any_grasped.float(),              # [b] binary indicator
             "gripper_touching_table": gripper_touching_table,   # [b] binary indicator
             "gripper_touching_bin": gripper_touching_bin,       # [b] binary indicator
-            "grasped_obj_touching_bin": grasped_obj_touching_bin # [b] binary indicator
+            "grasped_obj_touching_bin": grasped_obj_touching_bin, # [b] binary indicator
+            "target_obj": self.target_obj_idx,
+            "target_act_obj": self.target_act_obj_idx,
         })
 
         # Keep legacy individual object keys if your reward calculation explicitly relies on them:
@@ -490,15 +505,27 @@ class Separate(DefaultCameraEnv):
 
         return obs
 
+    def _target_in_target_area(self):
+        batch_idx = torch.arange(self.num_envs, device=self.device)
+        obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)  # [b, 4, 3]
+        target_pos = obj_positions[batch_idx, self.target_act_obj_idx]  # [b, 3]
+
+        within_target_x = torch.abs(target_pos[:, 0] - self.DROP_LOCATION[0]) <= (self.DROP_ZONE_WIDTH / 2.0)
+        within_target_y = torch.abs(target_pos[:, 1] - self.DROP_LOCATION[1]) <= (self.DROP_ZONE_HEIGHT / 2.0)
+        resting_on_table = (target_pos[:, 2] < 0.04) & (target_pos[:, 2] > -0.01)
+
+        return within_target_x & within_target_y & resting_on_table
+
     def evaluate(self):
         bin_xy = self.bin.pose.p[..., :2]
         if bin_xy.ndim == 1:
             bin_xy = bin_xy.unsqueeze(0)
 
-        bin_half_size = self.block_half_size[1]
-        drop_zone_center = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)[..., :2]
-        drop_zone_half_width = self.DROP_ZONE_WIDTH / 2.0
-        drop_zone_half_height = self.DROP_ZONE_HEIGHT / 2.0
+        if _target_in_target_area(target_obj_idx):
+            self._assign_target_object()
+            target_act_obj_idx = none
+        if is_object_visible(target_obj_idx):
+            self._update_active_target()
 
         all_outside_bin = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         all_on_table = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
@@ -510,10 +537,7 @@ class Separate(DefaultCameraEnv):
             dist_to_bin = torch.linalg.norm(obj_xy - bin_xy, dim=-1)
             outside_bin = dist_to_bin > (bin_half_size + 0.05)
 
-            within_target_x = torch.abs(obj_xy[:, 0] - drop_zone_center[0]) <= drop_zone_half_width
-            within_target_y = torch.abs(obj_xy[:, 1] - drop_zone_center[1]) <= drop_zone_half_height
-            resting_on_table = (obj_z < 0.04) & (obj_z > -0.01)
-            in_target_area = within_target_x & within_target_y & resting_on_table
+            in_target_area = _target_in_target_area(obj)
 
             all_outside_bin = all_outside_bin & outside_bin
             all_on_table = all_on_table & in_target_area
@@ -525,6 +549,7 @@ class Separate(DefaultCameraEnv):
             "all_outside_bin": all_outside_bin,
             "all_on_table": all_on_table,
         }
+    
 
     def compute_dense_reward(self, obs: Any, action: Any, info: dict):
         reward = torch.zeros((self.num_envs), device=self.device)
@@ -535,32 +560,52 @@ class Separate(DefaultCameraEnv):
         # Handle different obs dictionary structures (ManiSkill wraps extra info in "extra")
         obs_extra = obs["extra"] if "extra" in obs else obs
         target_idx = obs_extra["target_obj"]
-        target_grasped = torch.stack([obs_extra[f"obj{i+1}_grasped"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
-        target_tcp_dist = torch.stack([obs_extra[f"obj{i+1}_distance_to_gripper"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
-        target_nearest_collision = torch.stack([obs_extra[f"obj{i+1}_nearest_collision"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
+        target_act_idx = obs_extra["target_act_obj"]
 
+        has_target = target_idx >= 0
+        has_active_target = target_act_idx >= 0
+
+        # Small per-step time penalty when a target object is selected but no active target is yet established.
+        locating_time_penalty = torch.where(
+            has_target & (~has_active_target),
+            torch.full_like(reward, -0.01),
+            torch.zeros_like(reward),
+        )
+        reward += locating_time_penalty
+
+        target_grasped = torch.stack([obs_extra[f"obj{i+1}_grasped"] for i in range(len(self.objects))], dim=1)[batch_idx, target_act_idx.clamp(min=0)]
+        target_tcp_dist = torch.stack([obs_extra[f"obj{i+1}_distance_to_gripper"] for i in range(len(self.objects))], dim=1)[batch_idx, target_act_idx.clamp(min=0)]
+        target_nearest_collision = torch.stack([obs_extra[f"obj{i+1}_nearest_collision"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx.clamp(min=0)]
+
+        if gripper_touching_bin:
+            collision = True
+        elif gripper_touching_table:
+            colliusion = True
+        elif grasped_obj_lifted and grasped_obj_touching_bin:
+            collision = True
+        else: 
+            collision = False
 
         if not target_grasped:
 
-            visibility_reward = (1 - torch.tanh(5 * target_tcp_dist)) #* target_visible
+            visibility_reward = (1 - torch.tanh(5 * target_tcp_dist)) * is_object_visible(target_idx) # reward increases as gripper gets closer to visible target obj 
             reward = 0.5 * visibility_reward
 
-            reach_reward = (1 - torch.tanh(5 * target_tcp_dist))
+            reach_reward = (1 - torch.tanh(5 * target_tcp_dist)) # additional reward for reaching for target
             reward += reach_reward
 
 
         # Penalizes getting dangerously close (< 2.0 integer clearance units) to table or bin
-        collision_safe_margin = 2.0
-        collision_penalty = torch.clamp(collision_safe_margin - target_nearest_collision.float(), min=0.0)
-        reward -= 0.5 * collision_penalty
+        reward -= 2.5 * collision
 
         # Continuous reach reward (0 to 1) when not holding target
         # High discrete reward for active target grasp
         reward += 2.5 * target_grasped
-
+        reward += 2.5 * grasped_obj_lifted
+        reward += 2.5 * target_in_target_area(target_act_obj)
         # Distance from target object to desired drop location
         target_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1) 
-        target_pos = target_obj_positions[batch_idx, target_idx]
+        target_pos = target_obj_positions[batch_idx, target_act_idx]
         drop_dist = torch.linalg.norm(target_pos - DROP_LOCATION, dim=-1)
 
         # lift_height = torch.clamp(target_pos[:,2] - table_height, min=0)
