@@ -122,7 +122,6 @@ class Separate(DefaultCameraEnv):
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
         builder.add_multiple_convex_collisions_from_file(
             filename=obj_path,
-            #decomposition="coacd",
             material=physx_material,
         )
         builder.initial_pose = initial_pose
@@ -287,6 +286,23 @@ class Separate(DefaultCameraEnv):
             drop_pos = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32).repeat(b, 1)
             drop_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(b, 1)
             self.drop_zone_visual.set_pose(Pose.create_from_pq(p=drop_pos, q=drop_q))
+            self.target_obj_idx = torch.full(
+                (self.num_envs,),
+                -1,
+                dtype=torch.long,
+                device=self.device,
+            )
+            self.completed_objects = torch.zeros(
+                (self.num_envs, self.num_instruments),
+                dtype=torch.bool,
+                device=self.device,
+            )
+            self.target_act_obj_idx = torch.full(
+                (self.num_envs,),
+                -1,
+                dtype=torch.long,
+                device=self.device,
+            )
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -354,6 +370,56 @@ class Separate(DefaultCameraEnv):
         obj_xy = obj.pose.p[..., :2]
         return torch.linalg.norm(obj_xy - bin_xy, dim=-1) < (self.block_half_size[1] + 0.05)
 
+    def _assign_target_object(self):
+        obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
+        # distance from each object to the gripper TCP: [num_envs, num_objects]
+        tcp_pos = self.agent.tcp_pos.unsqueeze(1)
+        distances = torch.linalg.norm(obj_positions - tcp_pos, dim=-1)
+        # occlusion mask for each object: [num_envs, num_objects]
+        occluded = torch.stack([self.is_object_occluded(obj) for obj in self.objects], dim=1)
+        # exclude anything already completed
+        available = ~self.completed_objects.bool()
+        # first preference: unobcluded and not completed
+        unobcluded_distances = torch.where(
+            (~occluded) & available,
+            distances,
+            torch.full_like(distances, float("inf")),
+        )
+        target_obj_idx_unobstructed = torch.argmin(unobcluded_distances, dim=1)
+        # fallback: closest available object overall
+        available_distances = torch.where(
+            available,
+            distances,
+            torch.full_like(distances, float("inf")),
+        )
+        target_obj_idx_closest = torch.argmin(available_distances, dim=1)
+        # choose unobstructed if any exist; otherwise use closest overall
+        has_unobstructed = ((~occluded) & available).any(dim=1)
+        self.target_obj_idx = torch.where(
+            has_unobstructed,
+            target_obj_idx_unobstructed,
+            target_obj_idx_closest,
+        ).long()
+
+    def _update_active_target(self):
+        batch_idx = torch.arange(self.num_envs, device=self.device)
+
+        visible = torch.stack(
+            [self.is_object_visible(obj) for obj in self.objects],
+            dim=1,
+        )  # [num_envs, num_objects]
+
+        target_visible = visible[
+            batch_idx,
+            self.target_obj_idx
+        ]
+
+        self.target_act_obj_idx = torch.where(
+            target_visible,
+            self.target_obj_idx,
+            self.target_act_obj_idx,
+        )
+
     def _get_obs_extra(self, info: dict):
         obs = dict(tcp_pose=self.agent.tcp_pose.raw_pose)
 
@@ -362,7 +428,6 @@ class Separate(DefaultCameraEnv):
         tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1) # [b, 1, 3]
         instrument_distances = torch.linalg.norm(obj_positions - tcp_pos_expanded, dim=-1) # [b, 4]
 
-        # Check grasp state for each object
         grasped_states = []
         grasped_objs = []
         for obj in self.objects:
@@ -376,7 +441,16 @@ class Separate(DefaultCameraEnv):
 
         if len(grasped_objs) > 1:
             pass
-
+        # grasped_states = []
+        # for obj in self.objects:
+        #     # Fallback check if agent.is_grasping requires specified actor
+        #     is_grasped = self.agent.is_grasping(obj) 
+        #     if isinstance(is_grasped, bool):
+        #         is_grasped = torch.tensor([is_grasped], device=self.device).repeat(self.num_envs)
+        #     grasped_states.append(is_grasped.float())
+        
+        # grasped_tensor = torch.stack(grasped_states, dim=1) # [b, 4]
+        # any_grasped = torch.any(grasped_tensor > 0.5, dim=-1) # [b]            
         # check contact forces or overlapping bodies using PhysX
         #gripper_links = self.agent.finger1_link.actor if hasattr(self.agent, "finger1_link") else self.agent.robot.get_links()
         
@@ -402,7 +476,7 @@ class Separate(DefaultCameraEnv):
         # 5. Populate Cleaned Observation Dictionary
         obs.update({
             "instrument_distances": instrument_distances,      # [b, 4] tensor of distances
-            "grasped_objects": grasped_tensor,                 # [b, 4] binary mask of grasped items
+            "grasped_objects": grasped_objs,                 # [b, 4] binary mask of grasped items
             "is_any_grasped": any_grasped.float(),              # [b] binary indicator
             "gripper_touching_table": gripper_touching_table,   # [b] binary indicator
             "gripper_touching_bin": gripper_touching_bin,       # [b] binary indicator
@@ -416,84 +490,15 @@ class Separate(DefaultCameraEnv):
 
         return obs
 
-    # def _get_obs_extra(self, info: dict):
-        # obs = dict(tcp_pose=self.agent.tcp_pose.raw_pose)
-
-        # DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
-
-        # gripper_to_bin = torch.linalg.norm(self.agent.tcp_pos - self.bin.pose.p, dim=-1)
-        # gripper_to_table = torch.abs(self.agent.tcp_pos[..., 2] - 0.02)
-
-        # all_distances = []
-        # all_occluded = []
-
-        # for obj in self.objects:
-        #     dist = torch.linalg.norm(obj.pose.p - self.agent.tcp_pos, dim=-1)
-        #     occluded = self.is_object_occluded(obj)
-        #     all_distances.append(dist)
-        #     all_occluded.append(occluded)
-
-        # distances_tensor = torch.stack(all_distances, dim=0)
-        # occluded_tensor = torch.stack(all_occluded, dim=0)
-
-        # unoccluded_distances = torch.where(~occluded_tensor, distances_tensor, torch.tensor(float("inf"), device=self.device))
-
-        # target_obj_idx = torch.argmin(unoccluded_distances, dim=0)
-        # all_are_occluded = torch.all(occluded_tensor, dim=0)
-        # closest_overall_idx = torch.argmin(distances_tensor, dim=0)
-        # target_obj_idx = torch.where(all_are_occluded, closest_overall_idx, target_obj_idx)
-        # obs["target_obj"] = target_obj_idx.long()
-
-        # for i, obj in enumerate(self.objects):
-        #     prefix = f"obj{i+1}"
-
-        #     obj_pos = obj.pose.p
-        #     obj_quat = obj.pose.q
-
-        #     visible = self.is_object_visible(obj)
-        #     occluded = self.is_object_occluded(obj)
-        #     inside_bin = self.is_inside_bin(obj)
-        #     touching = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        #     grasped = self.agent.is_grasping(obj)
-
-        #     tcp_dist = distances_tensor[i]
-        #     drop_distance = torch.linalg.norm(obj_pos - DROP_LOCATION, dim=-1) # distance of grasped obj from drop location
-
-        #     grasped_bin_dist = torch.linalg.norm(obj.pose.p - self.bin.pose.p, dim=-1) # distance from grasped obj to bin
-        #     gripper_min_dist = torch.minimum(gripper_to_table, gripper_to_bin) # min distance from gripper to bin or table
-        #     nearest_collision_float = torch.where(grasped, grasped_bin_dist, gripper_min_dist)
-        #     nearest_collision = nearest_collision_float.round().long()
-
-        #     obs.update(
-        #         {
-        #             f"{prefix}_visible": visible.float(),
-        #             f"{prefix}_occluded": occluded.float(),
-        #             f"{prefix}_inside_bin": inside_bin.float(),
-        #             f"{prefix}_touching": touching.float(),
-        #             f"{prefix}_grasped": grasped.float(),
-        #             f"{prefix}_nearest_collision": nearest_collision,
-        #             f"{prefix}_distance_to_gripper": tcp_dist,
-        #             f"{prefix}_orientation": obj_quat,
-        #             f"{prefix}_distance_to_drop": drop_distance * grasped.float(),
-        #         }
-        #     )
-
-        # return obs
-
     def evaluate(self):
-        poses_xy = [obj.pose.p[..., :2] for obj in self.objects]
-
-        # all_separated = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        # for i in range(self.num_instruments):
-        #     for j in range(i + 1, self.num_instruments):
-        #         dist = torch.linalg.norm(poses_xy[i] - poses_xy[j], dim=-1)
-        #         all_separated = all_separated & (dist > 0.15)
-
         bin_xy = self.bin.pose.p[..., :2]
         if bin_xy.ndim == 1:
             bin_xy = bin_xy.unsqueeze(0)
 
         bin_half_size = self.block_half_size[1]
+        drop_zone_center = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)[..., :2]
+        drop_zone_half_width = self.DROP_ZONE_WIDTH / 2.0
+        drop_zone_half_height = self.DROP_ZONE_HEIGHT / 2.0
 
         all_outside_bin = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         all_on_table = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
@@ -504,22 +509,25 @@ class Separate(DefaultCameraEnv):
 
             dist_to_bin = torch.linalg.norm(obj_xy - bin_xy, dim=-1)
             outside_bin = dist_to_bin > (bin_half_size + 0.05)
-            on_table = (obj_z < 0.04) & (obj_z > -0.01)
+
+            within_target_x = torch.abs(obj_xy[:, 0] - drop_zone_center[0]) <= drop_zone_half_width
+            within_target_y = torch.abs(obj_xy[:, 1] - drop_zone_center[1]) <= drop_zone_half_height
+            resting_on_table = (obj_z < 0.04) & (obj_z > -0.01)
+            in_target_area = within_target_x & within_target_y & resting_on_table
 
             all_outside_bin = all_outside_bin & outside_bin
-            all_on_table = all_on_table & on_table
+            all_on_table = all_on_table & in_target_area
 
         success = all_outside_bin & all_on_table
 
         return {
             "success": success,
-            #"all_separated": all_separated,
             "all_outside_bin": all_outside_bin,
             "all_on_table": all_on_table,
         }
 
     def compute_dense_reward(self, obs: Any, action: Any, info: dict):
-        reward = torch.zeros((self.num_envs,), device=self.device)
+        reward = torch.zeros((self.num_envs), device=self.device)
         DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
 
         batch_idx = torch.arange(self.num_envs, device=self.device)
