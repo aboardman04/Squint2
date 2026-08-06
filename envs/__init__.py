@@ -17,3 +17,5 @@ import envs.separate_instruments_4
 import envs.separate4_instruments_1
 import envs.separate_4instruments_2
 import envs.separate_4instruments_3
+import envs.separate_4instruments_5
+import envs.reach_instruments
