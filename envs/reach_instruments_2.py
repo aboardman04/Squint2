@@ -26,7 +26,7 @@ class SeparateRandomizationConfig(DefaultRandomizationConfig):
     randomize_item_color: bool = False
 
 
-@register_env("ReachInstruments-v1", max_episode_steps=500)
+@register_env("ReachInstruments-v1", max_episode_steps=50)
 class Separate(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
@@ -102,13 +102,33 @@ class Separate(DefaultCameraEnv):
             else False,
         )
 
+    def _get_mesh_center(self, obj_path: str) -> np.ndarray:
+        vertices = []
+        with open(obj_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("v "):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        vertices.append(np.array(parts[1:4], dtype=np.float32))
+        if not vertices:
+            return np.zeros(3, dtype=np.float32)
+        return np.mean(np.stack(vertices, axis=0), axis=0)
+
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
         steel_material = sapien.render.RenderMaterial(base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=1.0)
         physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
         builder.add_multiple_convex_collisions_from_file(filename=obj_path, material=physx_material)
-        builder.initial_pose = initial_pose
+
+        mesh_center = self._get_mesh_center(obj_path)
+        pose_pos = np.array(initial_pose.p, dtype=np.float32)
+        translated_pose = sapien.Pose(
+            p=(pose_pos - mesh_center).tolist(),
+            q=initial_pose.q,
+        )
+        builder.initial_pose = translated_pose
         return builder.build(name=name)
 
     def _sample_instrument_poses(self, b: int, base_pos: torch.Tensor):
