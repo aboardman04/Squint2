@@ -14,8 +14,6 @@ from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
 from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
-
-# Base randomization imports
 from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 from .robot.so101 import SO101
 
@@ -58,12 +56,12 @@ class Separate(DefaultCameraEnv):
         *args,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
-        robot_init_qpos_noise=0.02,
+        domain_randomization_config: Union[
+            SeparateRandomizationConfig, dict
+        ] = SeparateRandomizationConfig(),
         domain_randomization=False,
-        domain_randomization_config=None,
         **kwargs,
     ):
-        self.robot_init_qpos_noise = robot_init_qpos_noise
         self.base_z_rot = 0
         self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
 
@@ -88,11 +86,11 @@ class Separate(DefaultCameraEnv):
             **kwargs,
         )
 
-    @property
-    def _default_sim_config(self):
-        return SimConfig(
-            gpu_memory_config=GPUMemoryConfig(found_lost_pairs_capacity=2**25, max_rigid_patch_count=2**18)
-        )
+    # @property
+    # def _default_sim_config(self):
+    #     return SimConfig(
+    #         gpu_memory_config=GPUMemoryConfig(found_lost_pairs_capacity=2**25, max_rigid_patch_count=2**18)
+    #     )
 
     def _load_agent(self, options: dict):
         super()._load_agent(
@@ -105,23 +103,11 @@ class Separate(DefaultCameraEnv):
         )
 
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
-        steel_material = sapien.render.RenderMaterial(
-            base_color=[0.44, 0.44, 0.44, 1.0],
-            roughness=0.15,
-            metallic=1.0,
-        )
-        physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.6,
-            dynamic_friction=0.5,
-            restitution=0.1,
-        )
-
+        steel_material = sapien.render.RenderMaterial(base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=1.0)
+        physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
-        builder.add_multiple_convex_collisions_from_file(
-            filename=obj_path,
-            material=physx_material,
-        )
+        builder.add_multiple_convex_collisions_from_file(filename=obj_path, material=physx_material)
         builder.initial_pose = initial_pose
         return builder.build(name=name)
 
@@ -129,21 +115,9 @@ class Separate(DefaultCameraEnv):
         poses = []
         for i in range(self.num_instruments):
             xyz = torch.zeros((b, 3), device=self.device)
-            xyz[:, 0] = (
-                base_pos[:, 0]
-                + (torch.rand(b, device=self.device) * 2 - 1)
-                * self.instrument_spawn_xy_range
-            )
-            xyz[:, 1] = (
-                base_pos[:, 1]
-                + (torch.rand(b, device=self.device) * 2 - 1)
-                * self.instrument_spawn_xy_range
-            )
-            xyz[:, 2] = (
-                base_pos[:, 2]
-                + self.instrument_spawn_z_base
-                + i * self.instrument_spawn_z_spacing
-            )
+            xyz[:, 0] = (base_pos[:, 0] + (torch.rand(b, device=self.device) * 2 - 1) * self.instrument_spawn_xy_range)
+            xyz[:, 1] = (base_pos[:, 1] + (torch.rand(b, device=self.device) * 2 - 1) * self.instrument_spawn_xy_range)
+            xyz[:, 2] = (base_pos[:, 2] + self.instrument_spawn_z_base + i * self.instrument_spawn_z_spacing)
 
             yaw = torch.rand(b, device=self.device) * 2 * torch.pi
             q = torch.zeros((b, 4), device=self.device)
@@ -154,31 +128,11 @@ class Separate(DefaultCameraEnv):
 
     def _build_drop_zone_outline(self, half_width: float, half_height: float, thickness: float = 0.0025):
         builder = self.scene.create_actor_builder()
-        green_material = sapien.render.RenderMaterial(
-            base_color=[0.0, 0.8, 0.2, 0.8],
-            roughness=0.1,
-            metallic=0.0
-        )
-        builder.add_box_visual(
-            pose=sapien.Pose(p=[0.0, half_height, 0.0]),
-            half_size=[half_width + thickness, thickness, thickness],
-            material=green_material,
-        )
-        builder.add_box_visual(
-            pose=sapien.Pose(p=[0.0, -half_height, 0.0]),
-            half_size=[half_width + thickness, thickness, thickness],
-            material=green_material,
-        )
-        builder.add_box_visual(
-            pose=sapien.Pose(p=[half_width, 0.0, 0.0]),
-            half_size=[thickness, half_height, thickness],
-            material=green_material,
-        )
-        builder.add_box_visual(
-            pose=sapien.Pose(p=[-half_width, 0.0, 0.0]),
-            half_size=[thickness, half_height, thickness],
-            material=green_material,
-        )
+        green_material = sapien.render.RenderMaterial(base_color=[0.0, 0.8, 0.2, 0.8], roughness=0.1, metallic=0.0)
+        builder.add_box_visual(pose=sapien.Pose(p=[0.0, half_height, 0.0]), half_size=[half_width + thickness, thickness, thickness], material=green_material)
+        builder.add_box_visual(pose=sapien.Pose(p=[0.0, -half_height, 0.0]), half_size=[half_width + thickness, thickness, thickness], material=green_material)
+        builder.add_box_visual(pose=sapien.Pose(p=[half_width, 0.0, 0.0]), half_size=[thickness, half_height, thickness], material=green_material)
+        builder.add_box_visual(pose=sapien.Pose(p=[-half_width, 0.0, 0.0]), half_size=[thickness, half_height, thickness], material=green_material)
         builder.initial_pose = sapien.Pose()
         return builder.build_kinematic("drop_zone_outline")
 
