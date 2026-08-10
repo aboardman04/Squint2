@@ -311,24 +311,15 @@ class Separate(DefaultCameraEnv):
         batch_idx = torch.arange(self.num_envs, device=self.device)
         current_target = self.target_obj_idx.clamp(min=0)
         target_reached = distances[batch_idx, current_target] < self.target_reach_thresh
-        static = self.agent.is_static()
 
-        just_reached = target_reached & static & (~self.reached_objects[batch_idx, current_target])
+        just_reached = target_reached & (~self.reached_objects[batch_idx, current_target])
         self.reached_objects[batch_idx, current_target] = self.reached_objects[batch_idx, current_target] | just_reached
 
         if just_reached.any():
             self.target_switch_timer[batch_idx[just_reached]] = 0
 
-        active_pause_mask = self.reached_objects[batch_idx, current_target] & target_reached & static
-        if active_pause_mask.any():
-            self.target_switch_timer[batch_idx[active_pause_mask]] += 1
-
-        reset_mask = (~active_pause_mask) & (~just_reached)
-        if reset_mask.any():
-            self.target_switch_timer[batch_idx[reset_mask]] = 0
-
         has_more_targets = (~self.reached_objects).any(dim=1)
-        switch_mask = active_pause_mask & (self.target_switch_timer[batch_idx] >= self.target_switch_pause_steps) & has_more_targets
+        switch_mask = just_reached & has_more_targets
         if switch_mask.any():
             self.target_step[switch_mask] = torch.clamp(self.target_step[switch_mask] + 1, max=self.max_targets - 1)
             self.target_obj_idx[switch_mask] = self.target_order[batch_idx[switch_mask], self.target_step[switch_mask]]
