@@ -20,3 +20,5 @@ import envs.separate_4instruments_3
 import envs.separate_4instruments_5
 import envs.reach_instruments
 import envs.reach_instruments_2
+import envs.lift_instruments
+import envs.lift_instruments_2
