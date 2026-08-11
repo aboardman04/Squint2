@@ -26,7 +26,7 @@ class SeparateRandomizationConfig(DefaultRandomizationConfig):
     randomize_item_color: bool = False
 
 
-@register_env("ReachInstruments-v1", max_episode_steps=50)
+@register_env("LiftInstruments-v1", max_episode_steps=50)
 class Separate(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
@@ -163,15 +163,15 @@ class Separate(DefaultCameraEnv):
         builder.initial_pose = sapien.Pose()
         self.table_mat = builder.build_kinematic("table_mat")
 
-        bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/box.obj"
-        bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
-        bin_steel_material = sapien.render.RenderMaterial(base_color=[1, 1, 1, 1.0], roughness=0.15, metallic=0.5)
-        physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
-        builder = self.scene.create_actor_builder()
-        builder.add_visual_from_file(filename=bin_path, material=bin_steel_material)
-        builder.add_multiple_convex_collisions_from_file(filename=bin_path, decomposition="coacd", material=physx_material)
-        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
-        self.bin = builder.build_kinematic("bin")
+        # bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/box.obj"
+        # bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
+        # bin_steel_material = sapien.render.RenderMaterial(base_color=[1, 1, 1, 1.0], roughness=0.15, metallic=0.5)
+        # physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
+        # builder = self.scene.create_actor_builder()
+        # builder.add_visual_from_file(filename=bin_path, material=bin_steel_material)
+        # builder.add_multiple_convex_collisions_from_file(filename=bin_path, decomposition="coacd", material=physx_material)
+        # builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
+        # self.bin = builder.build_kinematic("bin")
 
         inst1_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
         self.obj_1 = self._build_instrument(
@@ -247,11 +247,11 @@ class Separate(DefaultCameraEnv):
             center = center[env_idx]
             bin_pos = center.clone()
             bin_pos[:, 2] = float(self.block_half_size[2]) - 0.03
-            bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
-            q_tensor = torch.tensor(bin_q, device=self.device, dtype=bin_pos.dtype)
-            q_tensor = q_tensor.unsqueeze(0).repeat(b, 1)
-            bin_pose = Pose.create_from_pq(p=bin_pos, q=q_tensor)
-            self.bin.set_pose(bin_pose)
+            # bin_q = euler2quat(np.pi / 2, 0.0, 0.0)
+            # q_tensor = torch.tensor(bin_q, device=self.device, dtype=bin_pos.dtype)
+            # q_tensor = q_tensor.unsqueeze(0).repeat(b, 1)
+            # bin_pose = Pose.create_from_pq(p=bin_pos, q=q_tensor)
+            # self.bin.set_pose(bin_pose)
 
             spawn_base = bin_pos.clone()
             spawn_base[:, 2] += 0.03
@@ -263,17 +263,17 @@ class Separate(DefaultCameraEnv):
             self.obj = self.obj_1
 
             goal_xyz = self.obj.pose.p.clone()
-            goal_xyz[:, 2] += 0.01
+            goal_xyz[:, 2] += 0.02
             self.goal_site.set_pose(Pose.create_from_pq(goal_xyz))
 
             second_goal_xyz = self.obj_2.pose.p.clone()
-            second_goal_xyz[:, 2] += 0.01
+            second_goal_xyz[:, 2] += 0.02
             self.second_goal_site.set_pose(Pose.create_from_pq(second_goal_xyz))
-            
+
             self.target_obj_idx = torch.zeros((b,), dtype=torch.long, device=self.device)
             self.reached_objects = torch.zeros((b, self.max_targets), dtype=torch.bool, device=self.device)
             self.target_switch_timer = torch.zeros((b,), dtype=torch.int32, device=self.device)
-
+            
             self.target_order = torch.zeros((b, self.max_targets), dtype=torch.long, device=self.device)
             self.target_step = torch.zeros((b,), dtype=torch.long, device=self.device)
 
@@ -282,16 +282,6 @@ class Separate(DefaultCameraEnv):
             distances_to_base = torch.linalg.norm(obj_positions - base_positions.unsqueeze(1), dim=-1)
             self.target_order = torch.argsort(distances_to_base, dim=1)
             self.target_obj_idx = self.target_order[:, 0]
-
-
-            # init_distances = torch.stack(
-            #     [
-            #         torch.linalg.norm(self.obj_1.pose.p - self.agent.tcp_pos, dim=-1),
-            #         torch.linalg.norm(self.obj_2.pose.p - self.agent.tcp_pos, dim=-1),
-            #     ],
-            #     dim=1,
-            # )
-            # self.target_obj_idx = self._select_target_idx(init_distances, self.reached_objects)
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -318,11 +308,6 @@ class Separate(DefaultCameraEnv):
         visible = ((z > 0.01) & (torch.abs(x / z) < tan_half) & (torch.abs(y / z) < tan_half))
         return visible
 
-    # def _select_target_idx(self, distances: torch.Tensor, reached_objects: torch.Tensor) -> torch.Tensor:
-    #     remaining = ~reached_objects
-    #     candidate_distances = torch.where(remaining, distances, torch.full_like(distances, float("inf")))
-    #     return torch.argmin(candidate_distances, dim=1).long()
-
     def _update_target_progress(self, distances: torch.Tensor):
         batch_idx = torch.arange(self.num_envs, device=self.device)
         current_target = self.target_obj_idx.clamp(min=0)
@@ -335,14 +320,7 @@ class Separate(DefaultCameraEnv):
             self.target_switch_timer[batch_idx[just_reached]] = 0
 
         has_more_targets = (~self.reached_objects).any(dim=1)
-        switch_mask = just_reached & has_more_targets
-        if switch_mask.any():
-            self.target_step[switch_mask] = torch.clamp(self.target_step[switch_mask] + 1, max=self.max_targets - 1)
-            self.target_obj_idx[switch_mask] = self.target_order[batch_idx[switch_mask], self.target_step[switch_mask]]
-            self.target_switch_timer[batch_idx[switch_mask]] = 0
-
-        has_more_targets = (~self.reached_objects).any(dim=1)
-        switch_mask = just_reached & has_more_targets
+        switch_mask = False #just_reached & has_more_targets
         if switch_mask.any():
             self.target_step[switch_mask] = torch.clamp(self.target_step[switch_mask] + 1, max=self.max_targets - 1)
             self.target_obj_idx[switch_mask] = self.target_order[batch_idx[switch_mask], self.target_step[switch_mask]]
@@ -356,47 +334,17 @@ class Separate(DefaultCameraEnv):
         instrument_distances = torch.linalg.norm(target_site_positions - tcp_pos_expanded, dim=-1)
         self._update_target_progress(instrument_distances)
 
-        # grasped_states = []
-        # for obj in self.objects:
-        #     is_grasped = self.agent.is_grasping(obj)
-        #     if isinstance(is_grasped, bool):
-        #         is_grasped = torch.tensor([is_grasped], device=self.device).repeat(self.num_envs)
-        #     grasped_states.append(is_grasped.float())
-
-        # grasped_tensor = torch.stack(grasped_states, dim=1)
-        # any_grasped = (grasped_tensor > 0.5).any(dim=1)
-
         robot_touching_mat = self.agent.is_touching(self.table_mat).float()
-        robot_touching_bin = self.agent.is_touching(self.bin).float()
-        # gripper_to_bin_dist = torch.linalg.norm(self.agent.tcp_pos[..., :2] - self.bin.pose.p[..., :2], dim=-1)
-
-        # gripper_touching_bin = ((gripper_to_bin_dist < (self.block_half_size[1] + 0.01)) & (self.agent.tcp_pos[..., 2] < 0.1)).float()
-
-        # grasped_obj_touching_bin = torch.zeros(self.num_envs, device=self.device)
-        # for i, obj in enumerate(self.objects):
-        #     obj_to_bin_dist = torch.linalg.norm(obj.pose.p[..., :2] - self.bin.pose.p[..., :2], dim=-1)
-        #     obj_in_bin_wall = (obj_to_bin_dist < (self.block_half_size[1] + 0.01)) & (obj.pose.p[..., 2] < 0.05)
-        #     grasped_obj_touching_bin = torch.where(
-        #         (grasped_tensor[:, i] > 0.5) & obj_in_bin_wall, 
-        #         torch.tensor(1.0, device=self.device), 
-        #         grasped_obj_touching_bin
-        #     )
-
-        # grasped_obj_lifted = any_grasped & (grasped_obj_touching_bin < 0.5)
-
+        
         obs.update({
             "instrument_distances": instrument_distances,
-            # "is_any_grasped": any_grasped.float(),
             "robot_touching_mat": robot_touching_mat,
-            "robot_touching_bin": robot_touching_bin,
-            # "gripper_touching_bin": gripper_touching_bin,
-            # "grasped_obj_touching_bin": grasped_obj_touching_bin,
-            # "grasped_obj_lifted": grasped_obj_lifted.float(),
             "target_obj": self.target_obj_idx,
             "reached_objects": self.reached_objects,
             "target_switch_timer": self.target_switch_timer,
-            # "target_act_obj": self.target_act_obj_idx,
         })
+
+        obs.update(is_target_grasped=info["is_target_grasped"])
 
         num_objects = instrument_distances.shape[1]
 
@@ -449,26 +397,30 @@ class Separate(DefaultCameraEnv):
         is_reached = tcp_to_goal_dist <= self.target_goal_thresh
         is_robot_static = self.agent.is_static()
 
+        is_target_grasped = self.agent.is_grasping(self.target_obj)
+
         robot_touching_instrument = torch.stack(
             [self.agent.is_touching(obj) for obj in self.objects], dim=1
         ).any(dim=1)
         robot_touching_instrument_1 = self.agent.is_touching(self.obj_1)
         robot_touching_instrument_2 = self.agent.is_touching(self.obj_2)
         robot_touching_mat = self.agent.is_touching(self.table_mat)
-        robot_touching_bin = self.agent.is_touching(self.bin)
+
+        item_lifted = self.target_obj.pose.p[..., -1] >= (0.06)
 
         all_targets_reached = self.reached_objects.sum(dim=1) >= self.max_targets
-        success = all_targets_reached & is_robot_static & (~robot_touching_instrument_1) & (~robot_touching_instrument_2) & (~robot_touching_mat)
+        success = item_lifted & is_target_grasped #all_targets_reached & is_robot_static & (~robot_touching_instrument_1) & (~robot_touching_instrument_2) & (~robot_touching_mat)
 
         return {
-            "success": success,
             "is_reached": is_reached,
             "is_robot_static": is_robot_static,
             "robot_touching_instrument": robot_touching_instrument,
             "robot_touching_mat": robot_touching_mat,
-            "robto_touching_bin": robot_touching_bin,
             "target_obj": self.target_obj_idx,
             "reached_objects": self.reached_objects,
+            "is_target_grasped": is_target_grasped,
+            "item_lifted": item_lifted,
+            "success": success,
         }
 
     def compute_dense_reward(self, obs: Any, action: Any, info: dict):
@@ -492,6 +444,7 @@ class Separate(DefaultCameraEnv):
         )[batch_idx, active_idx_clamped]
         target_reached = target_tcp_dist < self.target_reach_thresh
         is_robot_static = self.agent.is_static()
+        is_target_grasped = self.agent.is_grasping(self.target_object)
 
         robot_touching_instrument = torch.stack(
             [self.agent.is_touching(obj) for obj in self.objects], dim=1
@@ -499,16 +452,12 @@ class Separate(DefaultCameraEnv):
         robot_touching_instrument_1 = self.agent.is_touching(self.obj_1)
         robot_touching_instrument_2 = self.agent.is_touching(self.obj_2)
         robot_touching_mat = obs_extra.get("robot_touching_mat", torch.zeros_like(reward)) > 0.5
-        robot_touching_bin = obs_extra.get("robot_touching_bin", torch.zeros_like(reward)) > 0.5
 
         reach_reward = 1 - torch.tanh(5 * target_tcp_dist)
-        reward += reach_reward
-        reward += target_reached.float()
-        reward += 1.5 * (target_reached & is_robot_static).float()
+        reward += reaching_reward + info["is_item_grasped"]
 
-        reward -= 2.5 * torch.logical_or(robot_touching_instrument_1, robot_touching_instrument_2).float()
+        #reward -= 2.5 * torch.logical_or(robot_touching_instrument_1, robot_touching_instrument_2).float()
         reward -= 3.0 * robot_touching_mat.float()
-        reward -= 3.0 * robot_touching_bin.float()
 
         if "success" in info:
             reward[info["success"]] += 15.0
