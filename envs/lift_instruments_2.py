@@ -1,4 +1,3 @@
-# use v1 !!!
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence, Union
 
@@ -105,76 +104,32 @@ class Separate(DefaultCameraEnv):
             return np.zeros(3, dtype=np.float32)
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
-    def _get_mesh_bounds(self, obj_path: str):
-        vertices = []
-        with open(obj_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("v "):
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        vertices.append(np.array(parts[1:4], dtype=np.float32))
-        if not vertices:
-            return np.zeros((2, 3), dtype=np.float32)
-        
-        verts = np.stack(vertices, axis=0)
-        return np.min(verts, axis=0), np.max(verts, axis=0)
-
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
         steel_material = sapien.render.RenderMaterial(
-            base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=1.0
+            base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=0.5
         )
         physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.6, dynamic_friction=0.5, restitution=0.1
+            static_friction=1.0, dynamic_friction=0.8, restitution=0.0
         )
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
-        builder.add_multiple_convex_collisions_from_file(
-            filename=obj_path, material=physx_material
-        )
-
-        min_bounds, max_bounds = self._get_mesh_bounds(obj_path)
-        mesh_center = (min_bounds + max_bounds) / 2.0
-
-        pose_pos = np.array(initial_pose.p, dtype=np.float32)
-        translated_pose = sapien.Pose(
-            p=(pose_pos - mesh_center).tolist(),
-            q=initial_pose.q,
-        )
-        builder.initial_pose = translated_pose
-        actor = builder.build(name=name)
-
-        # Local bounding box corners relative to the centered origin
-        local_min = min_bounds - mesh_center
-        local_max = max_bounds - mesh_center
         
-        corners = np.array([
-            [local_min[0], local_min[1], local_min[2]],
-            [local_min[0], local_min[1], local_max[2]],
-            [local_min[0], local_max[1], local_min[2]],
-            [local_min[0], local_max[1], local_max[2]],
-            [local_max[0], local_min[1], local_min[2]],
-            [local_max[0], local_min[1], local_max[2]],
-            [local_max[0], local_max[1], local_min[2]],
-            [local_max[0], local_max[1], local_max[2]],
-        ], dtype=np.float32)
-
-        # Store on actor or class attribute for vectorized lookup
-        actor.local_bbox_corners = torch.tensor(corners, device=self.device)
-        return actor
-
-    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
-        steel_material = sapien.render.RenderMaterial(
-            base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=1.0
-        )
-        physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.6, dynamic_friction=0.5, restitution=0.1
-        )
-        builder = self.scene.create_actor_builder()
-        builder.add_visual_from_file(filename=obj_path, material=steel_material)
-        builder.add_multiple_convex_collisions_from_file(
-            filename=obj_path, material=physx_material
-        )
+        try:
+            builder.add_multiple_convex_collisions_from_file(
+                filename=obj_path, 
+                decomposition="coacd", 
+                material=physx_material,
+                # Adjust contact offset to make collisions register earlier and prevent tunneling
+                contact_offset=0.001,
+                rest_offset=0.0
+            )
+        except TypeError:
+            # Fallback if specific decomposition keyword arguments differ in your version
+            builder.add_multiple_convex_collisions_from_file(
+                filename=obj_path, 
+                decomposition="coacd", 
+                material=physx_material
+            )
 
         mesh_center = self._get_mesh_center(obj_path)
         pose_pos = np.array(initial_pose.p, dtype=np.float32)
@@ -264,6 +219,9 @@ class Separate(DefaultCameraEnv):
         self.item_frictions = common.to_tensor(frictions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
 
+        for link in self.agent.robot.get_links():
+            print(link.name)
+
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
@@ -302,15 +260,7 @@ class Separate(DefaultCameraEnv):
 
             self.obj_1.set_pose(Pose.create_from_pq(p=p1, q=q1))
             self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
-
-            # Consistently select nearest object as target for each env in batch
-            obj_positions = torch.stack([self.obj_1.pose.p, self.obj_2.pose.p], dim=1)
-            base_positions = self.agent.robot.pose.p[env_idx]
-            distances_to_base = torch.linalg.norm(
-                obj_positions - base_positions.unsqueeze(1), dim=-1
-            )
-            target_indices = torch.argmin(distances_to_base, dim=1)
-            self.target_object = self.obj_1  # primary target reference
+            self.target_object = self.obj_1
 
     def _get_obs_extra(self, info: dict):
         obs = dict()
@@ -362,7 +312,7 @@ class Separate(DefaultCameraEnv):
         )
         reached_rest_qpos = distance_to_rest_qpos < 0.2
 
-        item_lifted = self.target_object.pose.p[..., -1] >= 0.05
+        item_lifted = self.target_object.pose.p[..., -1] >= 0.04
         robot_touching_mat = self.agent.is_touching(self.table_mat)
 
         success = item_lifted & is_item_grasped & reached_rest_qpos
@@ -377,20 +327,24 @@ class Separate(DefaultCameraEnv):
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # 1. Reach target instrument reward
+        # 1. Reaching reward (smooth distance penalty to target object)
         tcp_to_item_dist = torch.linalg.norm(
             self.target_object.pose.p - self.agent.tcp_pose.p, axis=1
         )
-        reaching_reward = 1 - torch.tanh(5 * tcp_to_item_dist)
-        reward = reaching_reward + info["is_item_grasped"].float()
+        reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_item_dist)
+        reward = reaching_reward
 
-        # 2. Lift back to rest qpos reward (active once object is grasped)
-        place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
-        reward += place_reward * info["is_item_grasped"].float()
+        # 2. Direct flat bonus for establishing a physics grasp
+        is_grasped = info["is_item_grasped"].float()
+        reward += is_grasped
 
-        # 3. Penalties & Incentives
+        # 3. Gated lifting/retraction reward (multiplied by is_grasped so it only counts if held)
+        place_reward = torch.exp(-2.0 * info["distance_to_rest_qpos"])
+        reward += place_reward * is_grasped
+
+        # 4. Penalties
         reward -= 3.0 * info["robot_touching_mat"].float()
-        reward -= 1.0 * (~info["item_lifted"]).float()  # Speed penalty until lifted
+        reward -= 1.0 * (~info["item_lifted"]).float()
 
         if "success" in info:
             reward[info["success"]] += 15.0

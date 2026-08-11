@@ -1,6 +1,7 @@
 import gymnasium as gym
 import numpy as np
 import time
+from mani_skill.agents.robots import Fetch, Panda
 
 # 1. Import mani_skill to ensure ManiSkill's environment registry is loaded
 import mani_skill.envs
@@ -18,11 +19,10 @@ except ImportError as e:
 
 def main():
     # The registered name of your separate instruments environment
-    env_id = 'ReachInstruments-v2'
+    env_id = 'LiftInstruments-v2'
     #"SeparateInstruments-v5"
  #"SO101LiftCube-v1"#   
     print(f"Creating environment: {env_id}...")
-    
     # Create the environment.
     # Setting render_mode="human" forces ManiSkill to spawn the interactive Sapien GUI.
     try:
