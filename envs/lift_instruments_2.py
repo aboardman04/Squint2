@@ -357,10 +357,8 @@ class Separate(DefaultCameraEnv):
         reward = reaching_reward.clone()
 
         # 2. Speed bonus during the approach phase (encourages moving fast *while* far away)
-        # As tcp_to_item_dist decreases, this factor scales down so it doesn't encourage slamming into the object
-        approach_weight = torch.clamp(tcp_to_item_dist / 0.15, 0.0, 1.0) # Active mainly when > 15cm away
-        # Get TCP linear velocity magnitude
-        tcp_vel = torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2.0, axis=1)
+        approach_weight = torch.clamp(tcp_to_item_dist / 0.15, 0.0, 1.0)
+        tcp_vel = torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2, axis=1)
         speed_bonus = approach_weight * torch.min(tcp_vel, torch.tensor(1.0, device=self.device))
         reward += 0.2 * speed_bonus
 
@@ -368,17 +366,33 @@ class Separate(DefaultCameraEnv):
         is_grasped = info["is_item_grasped"].float()
         reward += is_grasped
 
-        # 4. Gated lifting/retraction reward (multiplied by is_grasped so it only counts if held)
-        place_reward = torch.exp(-2.0 * info["distance_to_rest_qpos"])
-        reward += place_reward * is_grasped
-
-        # 5. Smoothness & Anti-Shakiness Penalties (Applied more heavily near the object / during lifting)
-        # Penalize large action changes (jerk/chattering) or high velocity when close/grasping
-        action_diff = torch.linalg.norm(action, axis=1) # or track delta action if accessible
-        smoothness_penalty = action_diff * (1.0 - approach_weight) # Higher penalty close to object
+        # =========================================================================
+        # 4. Post-Grasp Lift & 90-Degree Joint Pose Reward (Updated)
+        # =========================================================================
+        # Extract current height of the instrument (Z coordinate)
+        item_z = self.target_object.pose.p[..., 2]
+        lift_progress = torch.clamp((item_z - 0.008) / 0.04, 0.0, 1.0)
         
-        # Penalize high velocities during the delicate lift/retract phase to stop shaking
-        lift_phase_penalty = info["is_item_grasped"].float() * torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2.0, axis=1)
+        # Define target pose where all active arm joints are at 90 degrees (pi / 2 radians)
+        current_qpos = self.agent.robot.get_qpos()
+        target_90_deg_qpos = torch.full_like(current_qpos, np.pi / 2.0)
+        
+        # Calculate distance to the 90-degree pose across active arm joints (excluding gripper joints if needed)
+        # If your robot has N joints, you can target all or slice them (e.g., current_qpos[:, :-1])
+        joint_distance = torch.linalg.norm(current_qpos - target_90_deg_qpos, axis=-1)
+        
+        # Convert joint distance to a smooth exponential reward
+        pose_90_reward = torch.exp(-2.0 * joint_distance)
+        
+        # Combine lift progress and 90-degree alignment, gated strictly by the grip status
+        post_grasp_success_reward = lift_progress * pose_90_reward
+        reward += 3.0 * post_grasp_success_reward * is_grasped
+        # =========================================================================
+
+        # 5. Smoothness & Anti-Shakiness Penalties
+        action_diff = torch.linalg.norm(action, axis=1)
+        smoothness_penalty = action_diff * (1.0 - approach_weight)
+        lift_phase_penalty = is_grasped * torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2, axis=1)
 
         reward -= 0.1 * smoothness_penalty
         reward -= 0.05 * lift_phase_penalty
@@ -391,6 +405,6 @@ class Separate(DefaultCameraEnv):
             reward[info["success"]] += 15.0
 
         return reward
-
+        
     def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         return self.compute_dense_reward(obs=obs, action=action, info=info) / 18.0
