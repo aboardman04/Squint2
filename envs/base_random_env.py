@@ -213,10 +213,18 @@ class BaseRandomEnv(BaseEnv):
         builder.initial_pose = sapien.Pose()
         self.camera_mount = builder.build_kinematic("camera_mount")
 
+
         # Wrist camera mount
         builder = self.scene.create_actor_builder()
         builder.initial_pose = sapien.Pose()
+        ###
+        builder.add_box_collision(half_size=[0.005, 0.025, 0.025])
+        mount_material = sapien.render.RenderMaterial(base_color=[0.2, 0.2, 0.2, 1.0])
+        builder.add_box_visual(half_size=[0.005, 0.025, 0.025], material=mount_material)
+        ###
         self.wrist_camera_mount = builder.build_kinematic("wrist_camera_mount")
+
+    
 
     def _randomize_robot_color(self):
         """Apply robot color randomization if configured."""
@@ -458,7 +466,7 @@ class ThirdCameraEnv(BaseRandomEnv):
                 fov=self.DEFAULT_CAMERA_FOV + fov_noise,
                 near=0.01,
                 far=100,
-                mount=self.camera_mount,
+                mount=self.wrist_camera_mount, # used to be self.camera_mount
             )
         ]
 

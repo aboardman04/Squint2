@@ -219,9 +219,6 @@ class Separate(DefaultCameraEnv):
         self.item_frictions = common.to_tensor(frictions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
 
-        for link in self.agent.robot.get_links():
-            print(link.name)
-
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
         with torch.device(self.device):
@@ -326,23 +323,67 @@ class Separate(DefaultCameraEnv):
             "success": success,
         }
 
+    # def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+    #     # 1. Reaching reward (smooth distance penalty to target object)
+    #     tcp_to_item_dist = torch.linalg.norm(
+    #         self.target_object.pose.p - self.agent.tcp_pose.p, axis=1
+    #     )
+    #     reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_item_dist)
+    #     reward = reaching_reward
+
+    #     # 2. Direct flat bonus for establishing a physics grasp
+    #     is_grasped = info["is_item_grasped"].float()
+    #     reward += is_grasped
+
+    #     # 3. Gated lifting/retraction reward (multiplied by is_grasped so it only counts if held)
+    #     place_reward = torch.exp(-2.0 * info["distance_to_rest_qpos"])
+    #     reward += place_reward * is_grasped
+
+    #     # 4. Penalties
+    #     reward -= 3.0 * info["robot_touching_mat"].float()
+    #     reward -= 1.0 * (~info["item_lifted"]).float()
+
+    #     if "success" in info:
+    #         reward[info["success"]] += 15.0
+
+    #     return reward
+
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
         # 1. Reaching reward (smooth distance penalty to target object)
         tcp_to_item_dist = torch.linalg.norm(
             self.target_object.pose.p - self.agent.tcp_pose.p, axis=1
         )
         reaching_reward = 1.0 - torch.tanh(5.0 * tcp_to_item_dist)
-        reward = reaching_reward
+        reward = reaching_reward.clone()
 
-        # 2. Direct flat bonus for establishing a physics grasp
+        # 2. Speed bonus during the approach phase (encourages moving fast *while* far away)
+        # As tcp_to_item_dist decreases, this factor scales down so it doesn't encourage slamming into the object
+        approach_weight = torch.clamp(tcp_to_item_dist / 0.15, 0.0, 1.0) # Active mainly when > 15cm away
+        # Get TCP linear velocity magnitude
+        tcp_vel = torch.linalg.norm(self.agent.tcp.linear_velocity, axis=1)
+        speed_bonus = approach_weight * torch.min(tcp_vel, torch.tensor(1.0, device=self.device))
+        reward += 0.2 * speed_bonus
+
+        # 3. Direct flat bonus for establishing a physics grasp
         is_grasped = info["is_item_grasped"].float()
         reward += is_grasped
 
-        # 3. Gated lifting/retraction reward (multiplied by is_grasped so it only counts if held)
+        # 4. Gated lifting/retraction reward (multiplied by is_grasped so it only counts if held)
         place_reward = torch.exp(-2.0 * info["distance_to_rest_qpos"])
         reward += place_reward * is_grasped
 
-        # 4. Penalties
+        # 5. Smoothness & Anti-Shakiness Penalties (Applied more heavily near the object / during lifting)
+        # Penalize large action changes (jerk/chattering) or high velocity when close/grasping
+        action_diff = torch.linalg.norm(action, axis=1) # or track delta action if accessible
+        smoothness_penalty = action_diff * (1.0 - approach_weight) # Higher penalty close to object
+        
+        # Penalize high velocities during the delicate lift/retract phase to stop shaking
+        lift_phase_penalty = info["is_item_grasped"].float() * torch.linalg.norm(self.agent.tcp.linear_velocity, axis=1)
+
+        reward -= 0.1 * smoothness_penalty
+        reward -= 0.05 * lift_phase_penalty
+
+        # 6. Safety & Task Penalties
         reward -= 3.0 * info["robot_touching_mat"].float()
         reward -= 1.0 * (~info["item_lifted"]).float()
 
