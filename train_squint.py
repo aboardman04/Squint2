@@ -729,7 +729,7 @@ if __name__ == "__main__":
         max_length=min(args.buffer_size, args.total_timesteps), 
         rgb_dtype=np.uint8,
     )
-    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device=device))
+    rb = ReplayBuffer(storage=LazyTensorStorage(args.buffer_size, device="cpu"))
 
     # ── Print summary ──────────────────────────────────────────────────────
 
@@ -913,7 +913,7 @@ if __name__ == "__main__":
         # Training updates
         if global_step > args.learning_starts:
             for grad_step in range(args.num_updates):
-                data = rb.sample(args.batch_size)
+                data = rb.sample(args.batch_size).to(device)
 
                 # update critic and encoder and actor entropy
                 out_main = update_main(data)

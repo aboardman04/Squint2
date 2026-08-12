@@ -360,7 +360,7 @@ class Separate(DefaultCameraEnv):
         # As tcp_to_item_dist decreases, this factor scales down so it doesn't encourage slamming into the object
         approach_weight = torch.clamp(tcp_to_item_dist / 0.15, 0.0, 1.0) # Active mainly when > 15cm away
         # Get TCP linear velocity magnitude
-        tcp_vel = torch.linalg.norm(self.agent.tcp.linear_velocity, axis=1)
+        tcp_vel = torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2.0, axis=1)
         speed_bonus = approach_weight * torch.min(tcp_vel, torch.tensor(1.0, device=self.device))
         reward += 0.2 * speed_bonus
 
@@ -378,7 +378,7 @@ class Separate(DefaultCameraEnv):
         smoothness_penalty = action_diff * (1.0 - approach_weight) # Higher penalty close to object
         
         # Penalize high velocities during the delicate lift/retract phase to stop shaking
-        lift_phase_penalty = info["is_item_grasped"].float() * torch.linalg.norm(self.agent.tcp.linear_velocity, axis=1)
+        lift_phase_penalty = info["is_item_grasped"].float() * torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2.0, axis=1)
 
         reward -= 0.1 * smoothness_penalty
         reward -= 0.05 * lift_phase_penalty
