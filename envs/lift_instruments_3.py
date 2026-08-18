@@ -126,6 +126,7 @@ class Separate(DefaultCameraEnv):
             return np.zeros(3, dtype=np.float32)
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
+
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
         # Use color from env_cal if available, otherwise default steel color
         base_color = (
@@ -142,19 +143,37 @@ class Separate(DefaultCameraEnv):
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
 
+        # try:
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path,
+        #         decomposition="coacd",
+        #         material=physx_material,
+        #         contact_offset=0.010,
+        #         rest_offset=0.0,
+        #     )
+        # except TypeError:
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path,
+        #         decomposition="coacd",
+        #         material=physx_material,
+        #     )
+
         try:
+            # Switch decomposition to "vhacd" for tighter, more solid collision geometry on complex meshes,
+            # and increase contact_offset to detect collisions earlier and prevent tunneling.
             builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path,
-                decomposition="coacd",
+                filename=obj_path, 
+                # decomposition="vhacd", 
                 material=physx_material,
-                contact_offset=0.010,
-                rest_offset=0.0,
+                contact_offset=0.02,  # Increased from 0.010 to register contacts earlier
+                rest_offset=0.001
             )
         except TypeError:
+            # Fallback if specific decomposition keyword arguments differ in your version
             builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path,
-                decomposition="coacd",
-                material=physx_material,
+                filename=obj_path, 
+                # decomposition="vhacd", 
+                material=physx_material
             )
 
         mesh_center = self._get_mesh_center(obj_path)

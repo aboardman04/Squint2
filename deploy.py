@@ -283,16 +283,24 @@ class KeyboardController:
         self.old_settings = None
 
     def __enter__(self):
-        self.old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
+        try:
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        except termios.error:
+            self.old_settings = None
         return self
 
     def __exit__(self, *args):
-        if self.old_settings:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+        if self.old_settings is not None:
+            try:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+            except termios.error:
+                pass
 
     def check_key(self) -> Optional[str]:
         """Check for keyboard input without blocking. Returns key or None."""
+        if self.old_settings is None:
+            return None
         if select.select([sys.stdin], [], [], 0)[0]:
             return sys.stdin.read(1)
         return None
@@ -387,7 +395,7 @@ def main(args: Args):
         obs_mode=args.obs_mode,
         render_mode="sensors",
         max_episode_steps=args.max_episode_steps,
-        domain_randomization=False,
+        domain_randomization=True,
         reward_mode="none",
         control_mode=args.control_mode,
         sensor_configs=dict(width=args.image_size, height=args.image_size)
