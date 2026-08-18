@@ -120,7 +120,7 @@ class Separate(DefaultCameraEnv):
                 decomposition="coacd", 
                 material=physx_material,
                 # Adjust contact offset to make collisions register earlier and prevent tunneling
-                contact_offset=0.001,
+                contact_offset=0.010,
                 rest_offset=0.0
             )
         except TypeError:
@@ -215,6 +215,7 @@ class Separate(DefaultCameraEnv):
 
         self._load_camera_mount()
         self._randomize_robot_color()
+        self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
 
         self.item_frictions = common.to_tensor(frictions, device=self.device)
         self.item_densities = common.to_tensor(densities, device=self.device)
@@ -225,6 +226,14 @@ class Separate(DefaultCameraEnv):
             b = len(env_idx)
             self.table_scene.initialize(env_idx)
             self.table_scene.table.set_pose(self.table_pose)
+
+            self.agent.robot.set_qpos(
+                self.rest_qpos + torch.randn(size=(b, self.rest_qpos.shape[-1])) * self.domain_randomization_config.initial_qpos_noise_scale
+            )
+            self.agent.robot.set_pose(
+                Pose.create_from_pq(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot))
+            )
+
 
             if hasattr(self.table_scene, "table"):
                 table_z = self.table_scene.table.pose.p[..., 2]
@@ -259,28 +268,38 @@ class Separate(DefaultCameraEnv):
             self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
             self.target_object = self.obj_1
 
+    def _get_obs_agent(self):
+        qpos = self.agent.robot.get_qpos()
+        # Adding joint noise for better sim2real
+        if self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0:
+            noise = torch.randn_like(qpos) * self.domain_randomization_config.robot_qpos_noise_std
+            qpos = qpos + noise
+        obs = dict(noisy_qpos=qpos)
+        controller_state = self.agent.controller.get_state()
+        if len(controller_state) > 0:
+            obs.update(controller=controller_state)
+        return obs
+
+
     def _get_obs_extra(self, info: dict):
         obs = dict()
-        target_qpos = self.agent.controller._target_qpos.clone()
-        rest_qpos_tensor = torch.tensor(self.rest_qpos, device=self.device)
+        # target_qpos = self.agent.controller._target_qpos.clone()
+        # rest_qpos_tensor = torch.tensor(self.rest_qpos, device=self.device)
 
-        dist_to_rest_qpos = torch.linalg.norm(
-            target_qpos[:, :-1] - rest_qpos_tensor[:-1], axis=-1
-        )
-        tcp_to_item_dist = torch.linalg.norm(
-            self.target_object.pose.p - self.agent.tcp_pos, axis=-1
-        )
+        # dist_to_rest_qpos = torch.linalg.norm(
+        #     target_qpos[:, :-1] - rest_qpos_tensor[:-1], axis=-1
+        # )
+        tcp_to_item_dist = torch.linalg.norm(self.target_object.pose.p - self.agent.tcp_pos, axis=-1)
 
         obs.update(
             tcp_pose=self.agent.tcp_pose.raw_pose,
             target_item_pose=self.target_object.pose.raw_pose,
             tcp_to_item_pos=self.target_object.pose.p - self.agent.tcp_pos,
             tcp_to_item_dist=tcp_to_item_dist,
-            dist_to_rest_qpos=dist_to_rest_qpos,
-            is_item_grasped=info.get(
-                "is_item_grasped", self.agent.is_grasping(self.target_object)
-            ),
+            # dist_to_rest_qpos=dist_to_rest_qpos,
+            is_item_grasped=info.get("is_item_grasped", self.agent.is_grasping(self.target_object)),
             robot_touching_mat=self.agent.is_touching(self.table_mat).float(),
+            dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1],
         )
 
         if self.domain_randomization:
@@ -303,9 +322,9 @@ class Separate(DefaultCameraEnv):
         is_item_grasped = self.agent.is_grasping(self.target_object)
 
         target_qpos = self.agent.controller._target_qpos.clone()
-        rest_qpos_tensor = torch.tensor(self.rest_qpos, device=self.device)
+        # rest_qpos_tensor = torch.tensor(self.rest_qpos, device=self.device)
         distance_to_rest_qpos = torch.linalg.norm(
-            target_qpos[:, :-1] - rest_qpos_tensor[:-1], axis=-1
+            target_qpos[:, :-1] - self.rest_qpos[:-1], axis=-1
         )
         reached_rest_qpos = distance_to_rest_qpos < 0.2
 
@@ -370,24 +389,27 @@ class Separate(DefaultCameraEnv):
         # 4. Post-Grasp Lift & 90-Degree Joint Pose Reward (Updated)
         # =========================================================================
         # Extract current height of the instrument (Z coordinate)
-        item_z = self.target_object.pose.p[..., 2]
-        lift_progress = torch.clamp((item_z - 0.008) / 0.04, 0.0, 1.0)
+        # item_z = self.target_object.pose.p[..., 2]
+        # lift_progress = torch.clamp((item_z - 0.008) / 0.04, 0.0, 1.0)
         
-        # Define target pose where all active arm joints are at 90 degrees (pi / 2 radians)
-        current_qpos = self.agent.robot.get_qpos()
-        target_90_deg_qpos = torch.full_like(current_qpos, np.pi / 2.0)
+        # # Define target pose where all active arm joints are at 90 degrees (pi / 2 radians)
+        # current_qpos = self.agent.robot.get_qpos()
+        # target_90_deg_qpos = torch.full_like(current_qpos, np.pi / 2.0)
         
-        # Calculate distance to the 90-degree pose across active arm joints (excluding gripper joints if needed)
-        # If your robot has N joints, you can target all or slice them (e.g., current_qpos[:, :-1])
-        joint_distance = torch.linalg.norm(current_qpos - target_90_deg_qpos, axis=-1)
+        # # Calculate distance to the 90-degree pose across active arm joints (excluding gripper joints if needed)
+        # # If your robot has N joints, you can target all or slice them (e.g., current_qpos[:, :-1])
+        # joint_distance = torch.linalg.norm(current_qpos - target_90_deg_qpos, axis=-1)
         
-        # Convert joint distance to a smooth exponential reward
-        pose_90_reward = torch.exp(-2.0 * joint_distance)
+        # # Convert joint distance to a smooth exponential reward
+        # pose_90_reward = torch.exp(-2.0 * joint_distance)
         
-        # Combine lift progress and 90-degree alignment, gated strictly by the grip status
-        post_grasp_success_reward = lift_progress * pose_90_reward
-        reward += 3.0 * post_grasp_success_reward * is_grasped
+        # # Combine lift progress and 90-degree alignment, gated strictly by the grip status
+        # post_grasp_success_reward = lift_progress * pose_90_reward
+        # reward += 3.0 * post_grasp_success_reward * is_grasped
         # =========================================================================
+
+        place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
+        reward += place_reward * info["is_item_grasped"]
 
         # 5. Smoothness & Anti-Shakiness Penalties
         action_diff = torch.linalg.norm(action, axis=1)
