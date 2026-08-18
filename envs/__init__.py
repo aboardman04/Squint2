@@ -22,3 +22,4 @@ import envs.reach_instruments
 import envs.reach_instruments_2
 import envs.lift_instruments
 import envs.lift_instruments_2
+import envs.lift_instruments_3

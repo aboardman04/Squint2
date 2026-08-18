@@ -9,6 +9,11 @@ import sapien
 import torch
 from transforms3d.euler import euler2quat
 
+try:
+    import env_cal
+except ImportError:
+    env_cal = None
+
 from mani_skill.agents.robots import Fetch, Panda
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
@@ -96,6 +101,18 @@ class Separate(DefaultCameraEnv):
             else False,
         )
 
+    def _load_camera_mount(self):
+        """Matches the wrist camera alignment from LiftCube exactly."""
+        super()._load_camera_mount()
+        if hasattr(self, "wrist_camera") and self.wrist_camera is not None:
+            pos = getattr(env_cal, "WRIST_CAMERA_BASE_POS", (-0.0130, 0.0520, -0.0520))
+            rot = getattr(env_cal, "WRIST_CAMERA_BASE_ROT_RAD", (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0)))
+            fov = getattr(env_cal, "WRIST_CAMERA_FOV", np.deg2rad(71.0))
+            
+            self.wrist_camera.set_local_pose(sapien.Pose(p=pos, q=euler2quat(*rot)))
+            if hasattr(self.wrist_camera, "set_fov"):
+                self.wrist_camera.set_fov(fov)
+
     def _get_mesh_center(self, obj_path: str) -> np.ndarray:
         vertices = []
         with open(obj_path, "r", encoding="utf-8") as f:
@@ -110,8 +127,14 @@ class Separate(DefaultCameraEnv):
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
+        # Use color from env_cal if available, otherwise default steel color
+        base_color = (
+            env_cal.INSTRUMENT_COLOR
+            if env_cal and hasattr(env_cal, "INSTRUMENT_COLOR")
+            else [0.44, 0.44, 0.44, 1.0]
+        )
         steel_material = sapien.render.RenderMaterial(
-            base_color=[0.44, 0.44, 0.44, 1.0], roughness=0.15, metallic=0.5
+            base_color=base_color, roughness=0.15, metallic=0.5
         )
         physx_material = sapien.physx.PhysxMaterial(
             static_friction=1.0, dynamic_friction=0.8, restitution=0.0
@@ -189,8 +212,13 @@ class Separate(DefaultCameraEnv):
             p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2)
         )
 
-        blue_material = sapien.render.RenderMaterial(
-            base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0
+        table_mat_color = (
+            env_cal.TABLE_COLOR
+            if env_cal and hasattr(env_cal, "TABLE_COLOR")
+            else [0.1, 0.2, 0.85, 1.0]
+        )
+        mat_material = sapien.render.RenderMaterial(
+            base_color=table_mat_color, roughness=0.6, metallic=0.0
         )
         physx_material = sapien.physx.PhysxMaterial(
             static_friction=0.6, dynamic_friction=0.5, restitution=0.1
@@ -198,7 +226,7 @@ class Separate(DefaultCameraEnv):
         self.table_mat_half_size = [0.40, 0.80, 0.001]
         builder = self.scene.create_actor_builder()
         builder.add_box_visual(
-            half_size=self.table_mat_half_size, material=blue_material
+            half_size=self.table_mat_half_size, material=mat_material
         )
         builder.add_box_collision(
             half_size=self.table_mat_half_size, material=physx_material
