@@ -60,7 +60,8 @@ Optimally adjust your camera and sim environment before training so that your si
 python deploy_utils/tune_camera.py
 ```
 - In the window that opens press `p` once you have fine tuned your settings. This will print the values you adjusted to your terminal
-- In `env_cal.py` adjust the camer position, camera settings, and the colors of all of the things in your environment to match the exact colors in your camera once the camera settings have been adjusted.
+- In the window that opens press `c` once you have fine tuned your settings. This will automatically update env_cal.py with the camera positions and settings you adjusted in the window.
+- Once you have adjusted your camera settigns move your cursor over the areas of interest in view (the table, the robot gripper, the object), this will display the RGB values in the bottom left corner. In `env_cal.py` update the color values.
 
 Note: Currently overlay is set to false, this can be turned on to match the configuation of the original squint experiment and apply a solid colored greenscreen as the sim background. With overlay off and shadows enabled it will match the real environment more closely.
 
@@ -69,10 +70,16 @@ Note: Currently overlay is set to false, this can be turned on to match the conf
 Train an agent on the LiftCube task:
 
 ```bash
-python train_squint.py --env_id=SO101LiftCube-v1 --exp_name="checkpoint_name" --track --num_envs=128
+python train_squint.py \
+--env_id=SO101LiftCube-v1 \
+--exp_name="checkpoint_name" \
+--track \
+--num_envs=128 
 ```
-This allows you to change the file name the policy is saved to, track it in wandb, and it reduces the number of environments being trained at once making it take longer to train but be able to train on less powerful GPUs. To use '--track' make sure you are logged into wandb in your terminal. The env_id is specific to the task you are training.
-Using '--checkpoint=runs/checkpoint_name/ckpt.pt' allows you to continue training an existing policy. 
+This allows you to change the file name the policy is saved to, track it in wandb, and it reduces the number of environments being trained at once making it take longer to train but be able to train on less powerful GPUs. To use `--track` make sure you are logged into wandb in your terminal. The env_id is specific to the task you are training.
+Using `--checkpoint=runs/checkpoint_name/ckpt.pt` allows you to continue training an existing policy. 
+
+Change `--env_id` to the environemnt you want to train.
 
 ### Training with Weights & Biases Logging
 
@@ -90,7 +97,7 @@ At the end of training, the last checkpoint saved will be uploaded to wandb. You
 
 ### Visualize Environments
 
-You can visualize all available environments (8 environments) by running:
+You can visualize available environments by running:
 
 ```bash
 python examples/visualize_sim.py
@@ -98,7 +105,7 @@ python examples/visualize_sim.py
 
 ### Available Environments (SO-101 Task Set)
 
-| Environment | Description | Time to Training Convergence |
+| Environment ID | Description | Time to Training Convergence |
 |-------------|-------------|-------------|
 | `SO101ReachCube-v1` | Reach to a target cube position | 2 minutes |
 | `SO101ReachCan-v1` | Reach to a target can position | 2 minutes |
@@ -109,6 +116,8 @@ python examples/visualize_sim.py
 | `SO101PlaceCan-v1` | Pick up a can and place in the bin | 6 minutes |
 | `SO101StackCube-v1` | Stack the smaller cube on the larger one | 6 minutes |
 | `SO101StackCan-v1` | Stack the cube on the can | 9 minutes |
+| `ReachInstruments-v2` | Reach the closest instrument then the next one |
+| `LiftInstruments-v3` |  Lift one of the instruments | 
 
 For all our experiments we train with `--total_timesteps=1_500_000` which takes approximately 15 minutes. You can reduce the number of total timesteps depending on the task. For example, in Reach tasks you can run with `--total_timesteps=200_000` which will take ~2 minutes. Make sure your Squint agent achieves high success rate in simulation before deploying to your real SO-101 robot arm.
 
@@ -130,6 +139,22 @@ Use this command to test your policy in simulation before deploying it in the re
 ```bash
 python simulate_policy.py --env_id=SO101LiftCube-v1 --checkpoint=runs/checkpoint_name/ckpt.pt
 ```
+
+## Record Dataset from Sim
+```bash
+python collect_sim_data.py
+```
+Go into collect_sim_data.py and at the beggining of the file change:
+- `ENV_ID` --> make sure this matches the environment used to train the checkpoint
+- `CHECKPOINT`
+- `NUM_SUCCESSFUL_EPISODES` --> this is the number of episodes it will record for the dataset, it will onyl record sucessful episodes
+- `MAX_STEPS` --> this is the max steps per episode
+- `REPO_ID` --> this is where the dataset will be written to
+- `PUSH_TO_HUB` --> make true if you are ready to rercord a proper dataset to huggingface
+- `TASK_DESCRIPTION`--> this should align with the task descriptions for the real lerobot data
+
+Currently this file is set up to record all of the joint poisitions and actions of the sim robot accurately calibrated to align with the real lerobot data structure. It also records the visuals from the arm camera only. It could be set up to have multiple cameras, but that would require additonal calibration to make sure the sim and real camera angles aligned. The resolution of the recorded simulation visuals are set to be the same as the real camera, this can be changed inside of collect_sim_data.py. Once the dataset is in huggingface you can use it alongside real data to train a policy. View the LeRobot SmolVLA page on how to train a SmolVLA policy.
+
 
 ## 🤖 Deployment on Real SO-101 Robot
 

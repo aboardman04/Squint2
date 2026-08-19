@@ -8,12 +8,7 @@ import numpy as np
 import sapien
 import torch
 from transforms3d.euler import euler2quat
-
-try:
-    import env_cal
-except ImportError:
-    env_cal = None
-
+import env_cal
 from mani_skill.agents.robots import Fetch, Panda
 from mani_skill.utils import common
 from mani_skill.utils.registration import register_env
@@ -147,7 +142,7 @@ class Separate(DefaultCameraEnv):
             base_color=base_color, roughness=0.15, metallic=0.5
         )
         physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.5, dynamic_friction=0.4, restitution=0.005
+            static_friction=0.5, dynamic_friction=0.4, restitution=0.003
         )
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
@@ -158,7 +153,7 @@ class Separate(DefaultCameraEnv):
                 decomposition="coacd",
                 material=physx_material,
                 contact_offset=0.003,
-                rest_offset=0.001,
+                rest_offset=0.002,
             )
         except TypeError:
             builder.add_multiple_convex_collisions_from_file(
@@ -414,7 +409,7 @@ class Separate(DefaultCameraEnv):
         reward = reaching_reward.clone()
 
         approach_weight = torch.clamp(tcp_to_item_dist / 0.15, 0.0, 1.0)
-        tcp_vel = torch.linalg.norm(
+        tcp_velocity = torch.linalg.norm(
             (
                 self.agent.finger1_tip.linear_velocity
                 + self.agent.finger2_tip.linear_velocity
@@ -428,13 +423,13 @@ class Separate(DefaultCameraEnv):
 
         slow_zone = torch.clamp(0.08 - tcp_to_item_dist, 0.0, 0.08) / 0.08
         desired_speed = 0.08
-        speed_penalty = (slow_zone * torch.clamp(tcp_speed - desired_speed, min=0.0,))
+        speed_penalty = (slow_zone * torch.clamp(tcp_velocity - desired_speed, min=0.0,))
         reward -= 0.5 * speed_penalty
 
         is_grasped = info["is_item_grasped"].float()
         reward += is_grasped
 
-        stable_grasp = (is_grasped * torch.exp(-5.0 * tcp_speed))
+        stable_grasp = (is_grasped * torch.exp(-5.0 * tcp_velocity))
         reward += 0.5 * stable_grasp
 
         place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
@@ -442,14 +437,7 @@ class Separate(DefaultCameraEnv):
 
         action_diff = torch.linalg.norm(action, axis=1)
         smoothness_penalty = action_diff * (1.0 - approach_weight)
-        lift_phase_penalty = is_grasped * torch.linalg.norm(
-            (
-                self.agent.finger1_tip.linear_velocity
-                + self.agent.finger2_tip.linear_velocity
-            )
-            / 2,
-            axis=1,
-        )
+        lift_phase_penalty = is_grasped * torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2, axis=1)
 
         reward -= 0.1 * smoothness_penalty
         reward -= 0.05 * lift_phase_penalty

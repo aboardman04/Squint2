@@ -127,7 +127,21 @@ def get_sim_state(env):
 
 def convert_state_for_lerobot(sim_qpos):
     """Convert simulated qpos to the real dataset representation."""
-    return np.asarray(sim_qpos, dtype=np.float32).copy()
+    # Convert from radians to degrees
+    state = np.rad2deg(np.asarray(sim_qpos, dtype=np.float32).copy())
+
+    # Apply gripper mapping for SO101 (sim degrees -> servo degrees)
+    _gripper_sim_min = -10.0
+    _gripper_sim_max = 120.0
+    _gripper_servo_min = -62.5
+    _gripper_servo_max = 64.62
+    _gripper_sim_range = _gripper_sim_max - _gripper_sim_min
+    _gripper_servo_range = _gripper_servo_max - _gripper_servo_min
+
+    sim_deg = state[5]
+    state[5] = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range + _gripper_servo_min
+
+    return state
 
 
 def convert_action_for_lerobot(sim_action, current_sim_qpos):
@@ -139,7 +153,21 @@ def convert_action_for_lerobot(sim_action, current_sim_qpos):
     if action.shape != (6,):
         raise RuntimeError(f"Expected 6 actions, got {action.shape}")
 
-    return action.copy()
+    # Convert from radians to degrees
+    action_deg = np.rad2deg(action.copy())
+
+    # Apply gripper mapping for SO101 (sim degrees -> servo degrees)
+    _gripper_sim_min = -10.0
+    _gripper_sim_max = 120.0
+    _gripper_servo_min = -62.5
+    _gripper_servo_max = 64.62
+    _gripper_sim_range = _gripper_sim_max - _gripper_sim_min
+    _gripper_servo_range = _gripper_servo_max - _gripper_servo_min
+
+    sim_deg = action_deg[5]
+    action_deg[5] = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range + _gripper_servo_min
+    
+    return action_deg
 
 
 # ================================================================
