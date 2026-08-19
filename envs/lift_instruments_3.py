@@ -61,9 +61,7 @@ class Separate(DefaultCameraEnv):
         *args,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
-        domain_randomization_config: Union[
-            SeparateRandomizationConfig, dict
-        ] = SeparateRandomizationConfig(),
+        domain_randomization_config: Union[SeparateRandomizationConfig, dict] = SeparateRandomizationConfig(),
         domain_randomization=False,
             sim_config=dict(
                 sim_freq=SIM_FREQ,
@@ -108,8 +106,7 @@ class Separate(DefaultCameraEnv):
             sapien.Pose(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot)),
             build_separate=True
             if self.domain_randomization
-            and getattr(self.domain_randomization_config, "robot_color", None)
-            == "random"
+            and getattr(self.domain_randomization_config, "robot_color", None) == "random"
             else False,
         )
 
@@ -150,7 +147,7 @@ class Separate(DefaultCameraEnv):
             base_color=base_color, roughness=0.15, metallic=0.5
         )
         physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.5, dynamic_friction=0.4, restitution=0.05
+            static_friction=0.5, dynamic_friction=0.4, restitution=0.005
         )
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
@@ -356,21 +353,18 @@ class Separate(DefaultCameraEnv):
 
     def _get_obs_extra(self, info: dict):
         obs = dict()
-        tcp_to_item_dist = torch.linalg.norm(
-            self.target_object.pose.p - self.agent.tcp_pos, axis=-1
-        )
+        tcp_to_item_dist = torch.linalg.norm(self.target_object.pose.p - self.agent.tcp_pos, axis=-1)
+        tcp_velocity = (self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2
 
         obs.update(
             tcp_pose=self.agent.tcp_pose.raw_pose,
             target_item_pose=self.target_object.pose.raw_pose,
             tcp_to_item_pos=self.target_object.pose.p - self.agent.tcp_pos,
             tcp_to_item_dist=tcp_to_item_dist,
-            is_item_grasped=info.get(
-                "is_item_grasped", self.agent.is_grasping(self.target_object)
-            ),
+            tcp_velocity=tcp_velocity,
+            is_item_grasped=info.get("is_item_grasped", self.agent.is_grasping(self.target_object)),
             robot_touching_mat=self.agent.is_touching(self.table_mat).float(),
-            dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1]
-            - self.rest_qpos[:-1],
+            dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1],
         )
 
         if self.domain_randomization:
@@ -428,13 +422,20 @@ class Separate(DefaultCameraEnv):
             / 2,
             axis=1,
         )
-        speed_bonus = approach_weight * torch.min(
-            tcp_vel, torch.tensor(1.0, device=self.device)
-        )
-        reward += 0.2 * speed_bonus
+        
+        # speed_bonus = approach_weight * torch.min(tcp_vel, torch.tensor(1.0, device=self.device))
+        # reward += 0.2 * speed_bonus
+
+        slow_zone = torch.clamp(0.08 - tcp_to_item_dist, 0.0, 0.08) / 0.08
+        desired_speed = 0.08
+        speed_penalty = (slow_zone * torch.clamp(tcp_speed - desired_speed, min=0.0,))
+        reward -= 0.5 * speed_penalty
 
         is_grasped = info["is_item_grasped"].float()
         reward += is_grasped
+
+        stable_grasp = (is_grasped * torch.exp(-5.0 * tcp_speed))
+        reward += 0.5 * stable_grasp
 
         place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
         reward += place_reward * info["is_item_grasped"]
