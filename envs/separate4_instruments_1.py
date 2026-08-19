@@ -37,6 +37,10 @@ from .robot.so101 import SO101
 @dataclass
 class SeparateInstrumentsRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
+    item_friction_range: Sequence[float] = (0.1, 0.5)
+    item_density_range: Sequence[float] = (200, 200)
+    randomize_item_color: bool = False
+
 
 
 @register_env("SeparateInstruments-v2.5", max_episode_steps=20)
@@ -47,31 +51,20 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
                            "rgb+depth+segmentation", "rgb+depth+segmentation+state"]
     agent: Union[SO100, SO101, Panda, Fetch]
 
-    instrument_half_size = 0.025 #0.075
+    instrument_spawn_xy_range = 0.02
+    instrument_spawn_z_base = 0.008
+    instrument_spawn_z_spacing = 0.007
+    num_instruments = 1
 
-    def __init__(
-        self,
-        *args,
-        robot_uids="so101",
-        control_mode="pd_joint_target_delta_pos",
-        domain_randomization_config: Union[
-            SeparateInstrumentsRandomizationConfig, dict
-        ] = SeparateInstrumentsRandomizationConfig(),
-        domain_randomization=False,
+    def __init__(self, *args, robot_uids="so101", control_mode="pd_joint_target_delta_pos", domain_randomization_config: Union[SeparateInstrumentsRandomizationConfig, dict] = SeparateInstrumentsRandomizationConfig(),
+        domain_randomization=True,
         spawn_box_pos=[0.3, 0],
         spawn_box_half_size=0.2 / 2,
         **kwargs,
     ):
         # Robot-specific configuration
-        if robot_uids == "so100":
-            self.base_z_rot = np.pi / 2
-            self.rest_qpos = [0, 0, 0, np.pi / 2, np.pi / 2, 0]
-        elif robot_uids == "so101":
-            self.base_z_rot = 0
-            self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
-        else:
-            self.base_z_rot = 0
-            self.rest_qpos = None
+        self.base_z_rot = 0
+        self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
 
         self.domain_randomization_config = SeparateInstrumentsRandomizationConfig()
         merged_domain_randomization_config = self.domain_randomization_config.dict()
@@ -114,29 +107,6 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
             and self.domain_randomization_config.robot_color == "random"
             else False,
         )
-
-    def _build_settle_tray(self):
-        """Create an invisible tray used only while the instruments settle."""
-        wall_thickness = 0.003
-        wall_height = 0.04
-        half_size = 0.08
-        invisible = sapien.render.RenderMaterial(
-            base_color=[1, 1, 1, 0.5]
-        )
-        self.settle_walls = []
-        wall_specs = [
-            ([wall_thickness, half_size, wall_height], [-half_size, 0, wall_height]), # left
-            ([wall_thickness, half_size, wall_height], [half_size, 0, wall_height]),  # right
-            ([half_size, wall_thickness, wall_height], [0, half_size, wall_height]),  # front
-            ([half_size, wall_thickness, wall_height], [0, -half_size, wall_height]), # back        
-        ]
-        for i, (half_extents, local_pos) in enumerate(wall_specs):
-            builder = self.scene.create_actor_builder()
-            builder.add_box_collision(half_size=half_extents)
-            builder.add_box_visual(half_size=half_extents, material=invisible)
-            builder.initial_pose = sapien.Pose(p=local_pos)
-            wall = builder.build_kinematic(name=f"settle_wall_{i}")
-            self.settle_walls.append((wall, torch.tensor(local_pos, device=self.device)))
 
     def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(self)
@@ -546,17 +516,7 @@ class SeparateInstrumentsEnv(DefaultCameraEnv):
         reward[info["success"]] = 100.0
         return reward
 
-    def compute_normalized_dense_reward(
-        self,
-        obs,
-        action,
-        info,
-    ):
+    def compute_normalized_dense_reward(self, obs, action, info):
         return (
-            self.compute_dense_reward(
-                obs,
-                action,
-                info,
-            )
-            / 100.0
+            self.compute_dense_reward(obs, action, info) / 100.0
         )

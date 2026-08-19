@@ -53,6 +53,9 @@ class Separate(DefaultCameraEnv):
     instrument_separation = 0.12
     num_instruments = 2
 
+    SIM_FREQ = 200
+    CONTROL_FREQ = 20
+
     def __init__(
         self,
         *args,
@@ -62,6 +65,15 @@ class Separate(DefaultCameraEnv):
             SeparateRandomizationConfig, dict
         ] = SeparateRandomizationConfig(),
         domain_randomization=False,
+            sim_config=dict(
+                sim_freq=SIM_FREQ,
+                control_freq=CONTROL_FREQ,
+                scene_config=dict(
+                    solver_position_iterations=20,
+                    solver_velocity_iterations=2,
+                    enable_ccd=True,
+                ),
+            ),
         **kwargs,
     ):
         self.base_z_rot = 0
@@ -138,43 +150,43 @@ class Separate(DefaultCameraEnv):
             base_color=base_color, roughness=0.15, metallic=0.5
         )
         physx_material = sapien.physx.PhysxMaterial(
-            static_friction=1.0, dynamic_friction=0.8, restitution=0.0
+            static_friction=0.5, dynamic_friction=0.4, restitution=0.05
         )
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
 
-        # try:
-        #     builder.add_multiple_convex_collisions_from_file(
-        #         filename=obj_path,
-        #         decomposition="coacd",
-        #         material=physx_material,
-        #         contact_offset=0.010,
-        #         rest_offset=0.0,
-        #     )
-        # except TypeError:
-        #     builder.add_multiple_convex_collisions_from_file(
-        #         filename=obj_path,
-        #         decomposition="coacd",
-        #         material=physx_material,
-        #     )
-
         try:
-            # Switch decomposition to "vhacd" for tighter, more solid collision geometry on complex meshes,
-            # and increase contact_offset to detect collisions earlier and prevent tunneling.
             builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path, 
-                # decomposition="vhacd", 
+                filename=obj_path,
+                decomposition="coacd",
                 material=physx_material,
-                contact_offset=0.02,  # Increased from 0.010 to register contacts earlier
-                rest_offset=0.001
+                contact_offset=0.003,
+                rest_offset=0.001,
             )
         except TypeError:
-            # Fallback if specific decomposition keyword arguments differ in your version
             builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path, 
-                # decomposition="vhacd", 
-                material=physx_material
+                filename=obj_path,
+                decomposition="coacd",
+                material=physx_material,
             )
+
+        # try:
+        #     # Switch decomposition to "vhacd" for tighter, more solid collision geometry on complex meshes,
+        #     # and increase contact_offset to detect collisions earlier and prevent tunneling.
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path, 
+        #         # decomposition="vhacd", 
+        #         material=physx_material,
+        #         contact_offset=0.02,  # Increased from 0.010 to register contacts earlier
+        #         rest_offset=0.001
+        #     )
+        # except TypeError:
+        #     # Fallback if specific decomposition keyword arguments differ in your version
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path, 
+        #         # decomposition="vhacd", 
+        #         material=physx_material
+        #     )
 
         mesh_center = self._get_mesh_center(obj_path)
         pose_pos = np.array(initial_pose.p, dtype=np.float32)

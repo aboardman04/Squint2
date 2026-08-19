@@ -1,39 +1,3 @@
-"""
-Collect successful SO101 simulation demonstrations using a trained Squint policy.
-
-IMPORTANT DESIGN:
-
-    SAPIEN CAMERA
-         |
-         | 640 x 480 RGB
-         |
-         +-----------------------> DATASET
-         |                           |
-         |                           +--> observation.images.arm
-         |                           +--> observation.state
-         |                           +--> action
-         |
-         +--> DeployAgent
-                  |
-                  +--> downsamples to 16 x 16
-                  |
-                  +--> trained Squint policy
-                  |
-                  +--> action
-
-The RL policy therefore receives the SAME size input it was trained with,
-while the dataset receives the full-resolution camera image.
-
-Failed episodes are discarded.
-Successful episodes are written to a LeRobotDataset.
-
-Before collecting thousands of episodes, run:
-
-    --num_successful_episodes 5
-
-and inspect the resulting dataset.
-"""
-
 import os
 import sys
 import argparse
@@ -45,26 +9,40 @@ import numpy as np
 import torch
 import gymnasium as gym
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ================================================================
+# USER SETTINGS
+# ================================================================
 
-os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
+# Environment
+ENV_ID = "LiftInstruments-v3"
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-logging.disable(level=logging.WARN)
-from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
-import envs
-import mani_skill.envs
-from train_squint import DeployAgent
-from lerobot.datasets.lerobot_dataset import LeRobotDataset
+# Trained Squint checkpoint
+CHECKPOINT = "runs/lift_instruments_5.2/ckpt.pt"
 
-TASK_DESCRIPTION = "Lift the surgical instrument"
-DATASET_FPS = 30
+# Number of SUCCESSFUL episodes to collect
+NUM_SUCCESSFUL_EPISODES = 5
+
+MAX_STEPS = 20
+
+# Hugging Face dataset name
+REPO_ID = "aboardman/so101_separate_instruments_sim_0.2"
+
+# Set True only after verifying the local dataset
+PUSH_TO_HUB = True
+
+# Task description used in the dataset
+TASK_DESCRIPTION = "Separate the surgical instruments"
+
+# Camera settings -- match your real SO101 dataset
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
+DATASET_FPS = 30
+
+# Name used by the real LeRobot dataset
 IMAGE_FEATURE_NAME = "observation.images.arm"
-STATE_FEATURE_NAME = "observation.state"
-ACTION_FEATURE_NAME = "action"
-JOINT_NAMES = [
+
+# SO101 joint ordering used by the real dataset
+SO101_JOINT_NAMES = [
     "shoulder_pan.pos",
     "shoulder_lift.pos",
     "elbow_flex.pos",
@@ -72,619 +50,379 @@ JOINT_NAMES = [
     "wrist_roll.pos",
     "gripper.pos",
 ]
+
+# Squint policy input size -- DO NOT change unless the policy was
+# trained with a different size.
 POLICY_IMAGE_SIZE = 16
-NUM_SUCCESSFUL_EPISODES = 10
-MAX_STEPS = None
-TRAINING_DOMAIN_RANDOMIZATION = True
-TRAINING_RECONFIGURATION_FREQ = None
+
+# These should match the environment used during RL training
+DOMAIN_RANDOMIZATION = True
+RECONFIGURATION_FREQ = None
+
+# Starting seed. Each episode gets a different seed.
 BASE_SEED = 1000
 
-# UPLOAD
-# ------------------------------------------------
-# Start with False.
-# Once you have inspected the local dataset and verified that everything is correct, set this True or use --push_to_hub.
+# ================================================================
+# SETUP
+# ================================================================
 
-DEFAULT_PUSH_TO_HUB = False
-DEFAULT_REPO_ID = "YOUR_USERNAME/so101-instrument-sim"
-# OPTIONAL VIDEO PREVIEW (Keep False for large-scale collection)
-SAVE_PREVIEW_VIDEO = False
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+logging.disable(level=logging.WARN)
+
+from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+import envs
+import mani_skill.envs
+from train_squint import DeployAgent
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
-def get_dataset_image(env):
-    """
-    Get the FULL-RESOLUTION camera image for the dataset.
+# ================================================================
+# SIMULATION DATA EXTRACTION
+# ================================================================
 
-    IMPORTANT:
-        This is NOT the image fed to the Squint policy.
-
-    The environment is configured at 640x480, so obs["rgb"]
-    should contain the full-resolution camera observation.
-
-    Returns:
-        np.ndarray with shape (480, 640, 3), uint8
-    """
-
-    rgb = env.unwrapped.get_obs()["rgb"]
-
-    # In case the environment returns a batch dimension.
+def get_arm_image(obs):
+    """Return the 640x480 arm-camera RGB image."""
+    rgb = obs["rgb"]
+    if torch.is_tensor(rgb):
+        rgb = rgb.detach().cpu().numpy()
     if rgb.ndim == 4:
         rgb = rgb[0]
 
-    # Convert Torch -> NumPy.
-    if torch.is_tensor(rgb):
-        rgb = rgb.detach().cpu().numpy()
-
-    rgb = np.asarray(rgb)
-
-    if rgb.shape != (CAMERA_HEIGHT, CAMERA_WIDTH, 3):
+    expected = (CAMERA_HEIGHT, CAMERA_WIDTH, 3)
+    if rgb.shape != expected:
         raise RuntimeError(
-            f"Unexpected camera image shape: {rgb.shape}. "
-            f"Expected {(CAMERA_HEIGHT, CAMERA_WIDTH, 3)}."
+            f"Unexpected camera shape {rgb.shape}; expected {expected}. "
+            "Modify get_arm_image() if your environment exposes cameras differently."
         )
 
-    if rgb.dtype != np.uint8:
-        rgb = rgb.astype(np.uint8)
-
-    return rgb
+    return rgb.astype(np.uint8)
 
 
-def get_dataset_state(env):
-    """
-    Get the CLEAN SO101 joint positions.
-
-    We intentionally do NOT use:
-
-        obs["state"]
-
-    because that state may contain additional information
-    used by Squint.
-
-    We also do NOT use noisy_qpos.
-
-    Instead we directly read the simulated robot qpos.
-
-    Returns:
-        np.ndarray shape (N_JOINTS,), float32
-    """
-
+def get_sim_state(env):
+    """Return the six simulated SO101 joint positions."""
     qpos = env.unwrapped.agent.robot.get_qpos()
-
     if torch.is_tensor(qpos):
         qpos = qpos.detach().cpu().numpy()
-
-    qpos = np.asarray(qpos)
-
-    # Remove environment batch dimension.
     if qpos.ndim > 1:
         qpos = qpos[0]
 
-    qpos = qpos.astype(np.float32)
+    qpos = np.asarray(qpos, dtype=np.float32)
+
+    if qpos.shape != (6,):
+        raise RuntimeError(f"Expected 6 joints, got {qpos.shape}")
 
     return qpos
 
 
-def format_action_for_dataset(action, env):
-    """
-    Convert the Squint action into the action representation
-    that will be stored in the LeRobot dataset.
+# ================================================================
+# SIMULATION -> REAL DATA CONVERSION
+# ================================================================
+#
+# These are the functions we will modify after verifying the
+# ManiSkill SO101 state/action representation against your
+# real LeRobot dataset.
+# ================================================================
 
-    CURRENT VERSION:
+def convert_state_for_lerobot(sim_qpos):
+    """Convert simulated qpos to the real dataset representation."""
+    return np.asarray(sim_qpos, dtype=np.float32).copy()
 
-        Store the raw action produced by Squint.
 
-    IMPORTANT:
-        This is probably the function we will modify after
-        comparing the simulation action with your REAL
-        LeRobot action representation.
-
-    For example, if the real dataset stores absolute joint
-    positions while Squint produces joint deltas, we can
-    convert it here.
-
-    Returns:
-        np.ndarray shape (N_ACTIONS,), float32
-    """
-
-    action = np.asarray(action)
-
-    # Remove environment batch dimension.
+def convert_action_for_lerobot(sim_action, current_sim_qpos):
+    """Convert Squint action to the real dataset representation."""
+    action = np.asarray(sim_action, dtype=np.float32)
     if action.ndim > 1:
         action = action[0]
 
-    return action.astype(np.float32)
+    if action.shape != (6,):
+        raise RuntimeError(f"Expected 6 actions, got {action.shape}")
+
+    return action.copy()
 
 
-def get_success(info):
+# ================================================================
+# SUCCESS
+# ================================================================
 
+def episode_is_successful(info):
+    """Return the environment success flag."""
     if "success" in info:
         success = info["success"]
-
     elif "is_success" in info:
         success = info["is_success"]
-
     else:
-        return False
+        raise RuntimeError(
+            "No success signal found in info. "
+            "Expected info['success']."
+        )
 
     if torch.is_tensor(success):
         success = success.detach().cpu().numpy()
 
-    success = np.asarray(success)
-
-    return bool(success.reshape(-1)[0])
+    return bool(np.asarray(success).reshape(-1)[0])
 
 
-def build_dataset_frame(
-    image,
-    state,
-    action,
-):
+# ================================================================
+# LEROBOT DATASET
+# ================================================================
 
-    frame = {
-        IMAGE_FEATURE_NAME: image,
-        STATE_FEATURE_NAME: state,
-        ACTION_FEATURE_NAME: action,
+def build_dataset_features():
+    """Define the simulation dataset schema."""
+
+    return {
+        "observation.images.arm": {
+            "dtype": "video",
+            "shape": (CAMERA_HEIGHT, CAMERA_WIDTH, 3),
+            "names": ["height", "width", "channel"],
+        },
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (6,),
+            "names": SO101_JOINT_NAMES,
+        },
+        "action": {
+            "dtype": "float32",
+            "shape": (6,),
+            "names": SO101_JOINT_NAMES,
+        },
+    }
+
+
+def build_frame(image, state, action):
+    """Create one LeRobot timestep."""
+    return {
+        "observation.images.arm": image,
+        "observation.state": state,
+        "action": action,
         "task": TASK_DESCRIPTION,
     }
 
-    return frame
 
+# ================================================================
+# ENVIRONMENT
+# ================================================================
 
-def build_dataset_features(state_dim, action_dim):
-    """
-    Define the LeRobot dataset schema.
-
-    THIS IS THE SECOND MAIN PLACE TO EDIT.
-
-    The names/shapes here should eventually be made identical
-    to your REAL SO101 dataset.
-    """
-
-    if len(JOINT_NAMES) != state_dim:
-        raise ValueError(
-            f"JOINT_NAMES contains {len(JOINT_NAMES)} names, "
-            f"but simulation state has dimension {state_dim}."
-        )
-
-    features = {
-
-        IMAGE_FEATURE_NAME: {
-            "dtype": "video",
-
-            # LeRobot accepts HWC image input.
-            "shape": (
-                CAMERA_HEIGHT,
-                CAMERA_WIDTH,
-                3,
-            ),
-
-            "names": [
-                "height",
-                "width",
-                "channel",
-            ],
-        },
-
-        STATE_FEATURE_NAME: {
-            "dtype": "float32",
-            "shape": (state_dim,),
-            "names": JOINT_NAMES,
-        },
-
-        ACTION_FEATURE_NAME: {
-            "dtype": "float32",
-            "shape": (action_dim,),
-            "names": JOINT_NAMES[:action_dim],
-        },
-    }
-
-    return features
-
-def make_environment(env_id):
+def make_environment():
+    """Create the simulation environment using training settings."""
     env = gym.make(
-        env_id,
+        ENV_ID,
         obs_mode="rgb+segmentation",
         render_mode="rgb_array",
         sim_backend="gpu",
-        domain_randomization=TRAINING_DOMAIN_RANDOMIZATION,
-        reconfiguration_freq=TRAINING_RECONFIGURATION_FREQ,
+        domain_randomization=DOMAIN_RANDOMIZATION,
+        reconfiguration_freq=RECONFIGURATION_FREQ,
         sensor_configs={
             "width": CAMERA_WIDTH,
             "height": CAMERA_HEIGHT,
         },
-
         human_render_camera_configs={
             "width": CAMERA_WIDTH,
             "height": CAMERA_HEIGHT,
         },
-
         num_envs=1,
     )
 
-    env = FlattenRGBDObservationWrapper(
+    return FlattenRGBDObservationWrapper(
         env,
         rgb=True,
         depth=False,
         state=True,
     )
 
-    return env
 
-def load_policy(env, obs, checkpoint, device):
-    """
-    Load the trained Squint policy.
+# ================================================================
+# POLICY
+# ================================================================
 
-    DeployAgent automatically downsamples the 640x480 RGB
-    observation to POLICY_IMAGE_SIZE before passing it through
-    the trained CNN.
-    """
-
-    print(
-        f"Loading Squint policy from:\n"
-        f"    {checkpoint}"
-    )
-
+def load_policy(env, obs, device):
+    """Load the trained Squint policy."""
     agent = DeployAgent(
         env,
         obs,
         target_image_size=POLICY_IMAGE_SIZE,
         device=device,
     )
-
-    agent.load_checkpoint(checkpoint)
-
+    agent.load_checkpoint(CHECKPOINT)
     agent.eval()
-
     return agent
 
-def collect_episode(
-    env,
-    agent,
-    dataset,
-    seed,
-    device,
-):
-    """
-    Run one complete policy episode.
 
-    Frames are temporarily added to the LeRobot episode buffer.
+# ================================================================
+# COLLECT ONE EPISODE
+# ================================================================
 
-    If the episode succeeds:
-        save_episode()
+def collect_episode(env, agent, dataset, seed, device):
+    """Run one episode and save it only if successful."""
 
-    If the episode fails:
-        clear_episode_buffer()
-
-    This means failed demonstrations never become part of the
-    final dataset.
-    """
-
-    print(f"\nStarting episode with seed {seed}")
+    print(f"\nEpisode seed: {seed}")
 
     obs, info = env.reset(seed=seed)
+    success = False
+    max_steps = MAX_STEPS
 
-    episode_success = False
-    episode_done = False
-
-    if MAX_STEPS is not None:
-        max_steps = MAX_STEPS
-    else:
-        # Fall back to the environment's configured horizon.
-        max_steps = env.unwrapped.max_episode_steps
-
-        if max_steps is None:
-            raise RuntimeError(
-                "MAX_STEPS is None and the environment does not "
-                "provide max_episode_steps."
-            )
+    if max_steps is None:
+        raise RuntimeError("Environment has no max_episode_steps.")
 
     for step in range(max_steps):
-        image = get_dataset_image(env)
-        state = get_dataset_state(env)
+
+        # Current observation
+        image = get_arm_image(obs)
+        sim_state = get_sim_state(env)
+        state = convert_state_for_lerobot(sim_state)
+
+        # Policy action
         policy_obs = {
             "rgb": obs["rgb"].to(device),
             "state": obs["state"].to(device),
         }
 
         with torch.no_grad():
-            action = agent(policy_obs)
+            policy_action = agent(policy_obs)
 
-        action_np = action.detach().cpu().numpy()
-
-        dataset_action = format_action_for_dataset(
-            action_np,
-            env,
+        policy_action_np = (
+            policy_action.detach().cpu().numpy()
         )
 
-        frame = build_dataset_frame(
-            image=image,
-            state=state,
-            action=dataset_action,
+        # Convert action for dataset
+        action = convert_action_for_lerobot(
+            policy_action_np,
+            sim_state,
         )
 
-        dataset.add_frame(frame)
-
-        obs, reward, terminated, truncated, info = env.step(
-            action_np
-        )
-
-        episode_success = get_success(info)
-
-        terminated_bool = bool(
-            np.asarray(
-                terminated.detach().cpu().numpy()
-                if torch.is_tensor(terminated)
-                else terminated
-            ).reshape(-1)[0]
-        )
-
-        truncated_bool = bool(
-            np.asarray(
-                truncated.detach().cpu().numpy()
-                if torch.is_tensor(truncated)
-                else truncated
-            ).reshape(-1)[0]
-        )
-
-        episode_done = terminated_bool or truncated_bool
-
-        if episode_success:
-            print(
-                f"    SUCCESS at step {step + 1}"
+        # Record current state/action/image
+        dataset.add_frame(
+            build_frame(
+                image=image,
+                state=state,
+                action=action,
             )
-            break
-
-        if episode_done:
-            break
-
-    if episode_success:
-
-        dataset.save_episode()
-
-        print(
-            f"    SAVED successful episode "
-            f"({step + 1} frames)"
         )
 
+        # Execute policy
+        obs, reward, terminated, truncated, info = env.step(
+            policy_action_np
+        )
+
+        success = episode_is_successful(info)
+
+        if torch.is_tensor(terminated):
+            terminated = terminated.detach().cpu().numpy()
+
+        if torch.is_tensor(truncated):
+            truncated = truncated.detach().cpu().numpy()
+
+        terminated = bool(np.asarray(terminated).reshape(-1)[0])
+        truncated = bool(np.asarray(truncated).reshape(-1)[0])
+
+        if success:
+            print(f"SUCCESS at step {step + 1}")
+            break
+
+        if terminated or truncated:
+            break
+
+    if success:
+        dataset.save_episode()
+        print(f"Saved episode ({step + 1} frames)")
         return True
 
-    else:
+    dataset.clear_episode_buffer()
+    print(f"Discarded failed episode ({step + 1} frames)")
+    return False
 
-        dataset.clear_episode_buffer()
 
-        print(
-            f"    DISCARDED failed episode "
-            f"({step + 1} frames)"
-        )
-
-        return False
+# ================================================================
+# MAIN
+# ================================================================
 
 def main():
 
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--env_id",
-        type=str,
-        default="LiftInstruments-v2",
-    )
-
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to trained Squint ckpt.pt",
-    )
-
-    parser.add_argument(
-        "--num_successful_episodes",
-        type=int,
-        default=NUM_SUCCESSFUL_EPISODES,
-    )
-
-    parser.add_argument(
-        "--repo_id",
-        type=str,
-        default=DEFAULT_REPO_ID,
-        help="Hugging Face dataset repo ID",
-    )
-
-    parser.add_argument(
-        "--push_to_hub",
-        action="store_true",
-        help="Push dataset to Hugging Face after collection",
-    )
-
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=BASE_SEED,
-    )
-
-    args = parser.parse_args()
-
     device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "cpu"
+        "cuda" if torch.cuda.is_available() else "cpu"
     )
 
-    print("\n==============================================")
-    print("SQUINT → SMOLVLA SIMULATION DATA COLLECTION")
-    print("==============================================")
+    print("\n======================================")
+    print("SQUINT SIMULATION DATA COLLECTION")
+    print("======================================")
+    print(f"Environment:    {ENV_ID}")
+    print(f"Checkpoint:     {CHECKPOINT}")
+    print(f"Camera:         {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
+    print(f"Policy input:   {POLICY_IMAGE_SIZE}x{POLICY_IMAGE_SIZE}")
+    print(f"FPS:            {DATASET_FPS}")
+    print(f"Randomization:  {DOMAIN_RANDOMIZATION}")
+    print(f"Target episodes:{NUM_SUCCESSFUL_EPISODES}")
+    print(f"Dataset:        {REPO_ID}")
+    print(f"Device:         {device}")
 
-    print(f"Environment:       {args.env_id}")
-    print(f"Checkpoint:        {args.checkpoint}")
-    print(f"Camera:            {CAMERA_WIDTH} x {CAMERA_HEIGHT}")
-    print(f"Policy input:      {POLICY_IMAGE_SIZE} x {POLICY_IMAGE_SIZE}")
-    print(f"Dataset FPS:       {DATASET_FPS}")
-    print(f"Randomization:     {TRAINING_DOMAIN_RANDOMIZATION}")
-    print(f"Reconfiguration:   {TRAINING_RECONFIGURATION_FREQ}")
-    print(f"Target episodes:   {args.num_successful_episodes}")
-    print(f"Dataset:           {args.repo_id}")
-    print(f"Device:            {device}")
+    random.seed(BASE_SEED)
+    np.random.seed(BASE_SEED)
+    torch.manual_seed(BASE_SEED)
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    env = make_environment()
 
-    env = make_environment(args.env_id)
-
-    obs, info = env.reset(seed=args.seed)
-
-    agent = load_policy(
-        env,
-        obs,
-        args.checkpoint,
-        device,
-    )
-
-    # ============================================================
-    # DETERMINE DIMENSIONS
-    # ============================================================
-
-    state = get_dataset_state(env)
-
-    # Get action dimension from environment.
-    action_dim = int(
-        np.prod(
-            env.unwrapped.single_action_space.shape
-        )
-    )
-
-    state_dim = int(state.shape[0])
-
-    print("\nDataset dimensions:")
-    print(f"    state:  {state_dim}")
-    print(f"    action: {action_dim}")
-
-    # ============================================================
-    # DATASET FEATURES
-    # ============================================================
-
-    features = build_dataset_features(
-        state_dim=state_dim,
-        action_dim=action_dim,
-    )
-
-    print("\nDataset features:")
-
-    for name, feature in features.items():
-        print(f"    {name}: {feature}")
-
+    obs, info = env.reset(seed=BASE_SEED)
+    agent = load_policy(env, obs, device)
 
     dataset = LeRobotDataset.create(
-        repo_id=args.repo_id,
+        repo_id=REPO_ID,
         fps=DATASET_FPS,
         robot_type="so101_follower",
-        features=features,
+        features=build_dataset_features(),
         use_videos=True,
-        streaming_encoding=False,
+        # streaming_encoding=False,
         image_writer_threads=2,
     )
-    
-    # COLLECTION
+
     successful = 0
     attempted = 0
 
     try:
 
-        while successful < args.num_successful_episodes:
+        while successful < NUM_SUCCESSFUL_EPISODES:
 
-            seed = args.seed + attempted
-
+            seed = BASE_SEED + attempted
             attempted += 1
 
-            success = collect_episode(
-                env=env,
-                agent=agent,
-                dataset=dataset,
-                seed=seed,
-                device=device,
-            )
-
-            if success:
+            if collect_episode(
+                env,
+                agent,
+                dataset,
+                seed,
+                device,
+            ):
                 successful += 1
 
             print(
-                f"\nProgress:"
-                f" {successful}/{args.num_successful_episodes} "
-                f"successful"
-                f" | {attempted} attempts"
+                f"Progress: {successful}/"
+                f"{NUM_SUCCESSFUL_EPISODES} successful "
+                f"({attempted} attempts)"
             )
 
-            # Reset after every episode.
-            if successful < args.num_successful_episodes:
-                obs, info = env.reset(
-                    seed=args.seed + attempted
-                )
-
-        print("\n==============================================")
-        print("COLLECTION COMPLETE")
-        print("==============================================")
-
-        print(f"Successful episodes: {successful}")
-        print(f"Total attempts:      {attempted}")
-
-        if attempted > 0:
-            print(
-                f"Success rate:        "
-                f"{100.0 * successful / attempted:.2f}%"
-            )
-
-        # FINALIZE DATASET
-        print("\nFinalizing LeRobot dataset...")
+            if successful < NUM_SUCCESSFUL_EPISODES:
+                env.reset(seed=BASE_SEED + attempted)
 
         dataset.finalize()
 
+        print("\n======================================")
+        print("COLLECTION COMPLETE")
+        print("======================================")
+        print(f"Successful: {successful}")
+        print(f"Attempts:   {attempted}")
         print(
-            f"Dataset contains "
-            f"{dataset.num_episodes} episodes."
+            f"Success rate: "
+            f"{100 * successful / attempted:.2f}%"
         )
 
-        print(
-            f"Dataset contains "
-            f"{dataset.num_frames} frames."
-        )
-
-        # ========================================================
-        # OPTIONAL HUB UPLOAD
-        # ========================================================
-        if args.push_to_hub:
-
-            print("\nUploading dataset to Hugging Face...")
-
-            dataset.push_to_hub(
-                tags=[
-                    "SO101",
-                    "ManiSkill",
-                    "simulation",
-                    "Squint",
-                    "SmolVLA",
-                ],
-            )
-
-            print(
-                f"\nDataset uploaded to:\n"
-                f"https://huggingface.co/datasets/{args.repo_id}"
-            )
-
-        else:
-
-            print(
-                "\nDataset was NOT uploaded."
-            )
-
-            print(
-                "Use --push_to_hub when you are ready."
-            )
+        if PUSH_TO_HUB:
+            print("\nUploading dataset...")
+            dataset.push_to_hub()
+            print("Upload complete.")
 
     finally:
-        if dataset.has_pending_frames():
-
-            print("\nCleaning up unfinished episode...")
-
-            dataset.clear_episode_buffer()
         env.close()
+
 
 if __name__ == "__main__":
     main()
