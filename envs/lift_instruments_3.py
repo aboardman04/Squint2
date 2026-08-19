@@ -22,7 +22,7 @@ from .robot.so101 import SO101
 class SeparateRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
     item_friction_range: Sequence[float] = (0.1, 0.5)
-    item_density_range: Sequence[float] = (200, 200)
+    item_density_range: Sequence[float] = (7000, 7850)
     randomize_item_color: bool = False
 
 
@@ -131,7 +131,7 @@ class Separate(DefaultCameraEnv):
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
 
-    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
+    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose, density: Union[float, np.ndarray, list] = 1000.0):
         # Use color from env_cal if available, otherwise default steel color
         base_color = (
             env_cal.INSTRUMENT_COLOR
@@ -152,14 +152,16 @@ class Separate(DefaultCameraEnv):
                 filename=obj_path,
                 decomposition="coacd",
                 material=physx_material,
-                contact_offset=0.003,
-                rest_offset=0.002,
+                contact_offset=0.002,
+                rest_offset=0.001,
+                density=density,
             )
         except TypeError:
             builder.add_multiple_convex_collisions_from_file(
                 filename=obj_path,
                 decomposition="coacd",
                 material=physx_material,
+                density=density,
             )
 
         # try:
@@ -264,11 +266,13 @@ class Separate(DefaultCameraEnv):
             inst1_path,
             name="forceps_1",
             initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            density=densities,
         )
         self.obj_2 = self._build_instrument(
             inst1_path,
             name="forceps_2",
             initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            density=densities,
         )
         self.objects = [self.obj_1, self.obj_2]
         self.target_object = self.obj_1
