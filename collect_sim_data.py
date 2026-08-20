@@ -14,24 +14,24 @@ import gymnasium as gym
 # ================================================================
 
 # Environment
-ENV_ID = "LiftInstruments-v3"
+ENV_ID = "SO101LiftCube-v1"
 
 # Trained Squint checkpoint
-CHECKPOINT = "runs/lift_instruments_5.2/ckpt.pt"
+CHECKPOINT = "runs/lift_cube_1/ckpt.pt"
 
 # Number of SUCCESSFUL episodes to collect
 NUM_SUCCESSFUL_EPISODES = 5
 
-MAX_STEPS = 20
+MAX_STEPS = 50
 
 # Hugging Face dataset name
-REPO_ID = "aboardman/so101_separate_instruments_sim_0.2"
+REPO_ID = "aboardman/so101_lift_cube_sim_1"
 
 # Set True only after verifying the local dataset
 PUSH_TO_HUB = True
 
 # Task description used in the dataset
-TASK_DESCRIPTION = "Separate the surgical instruments"
+TASK_DESCRIPTION = "Lift the cube"
 
 # Camera settings -- match your real SO101 dataset
 CAMERA_WIDTH = 640
@@ -144,9 +144,9 @@ def convert_state_for_lerobot(sim_qpos):
     return state
 
 
-def convert_action_for_lerobot(sim_action, current_sim_qpos):
-    """Convert Squint action to the real dataset representation."""
-    action = np.asarray(sim_action, dtype=np.float32)
+def convert_action_for_lerobot(target_qpos_sim):
+    """Convert absolute target qpos (in radians) to the dataset action (in degrees)."""
+    action = np.asarray(target_qpos_sim, dtype=np.float32)
     if action.ndim > 1:
         action = action[0]
 
@@ -260,15 +260,34 @@ def make_environment():
     )
 
 
+def crop_to_square(rgb_tensor):
+    """Crop a batched RGB tensor (B, H, W, C) to a center square."""
+    B, H, W, C = rgb_tensor.shape
+    crop_size = min(H, W)
+    if W > H:
+        offset = (W - crop_size) // 2
+        return rgb_tensor[:, :, offset:offset + crop_size, :]
+    elif H > W:
+        offset = (H - crop_size) // 2
+        return rgb_tensor[:, offset:offset + crop_size, :, :]
+    return rgb_tensor
+
 # ================================================================
 # POLICY
 # ================================================================
 
 def load_policy(env, obs, device):
     """Load the trained Squint policy."""
+    
+    # We must crop the sample observation so the agent initializes correctly
+    sample_obs = {
+        "rgb": crop_to_square(obs["rgb"]),
+        "state": obs["state"],
+    }
+    
     agent = DeployAgent(
         env,
-        obs,
+        sample_obs,
         target_image_size=POLICY_IMAGE_SIZE,
         device=device,
     )
@@ -302,7 +321,7 @@ def collect_episode(env, agent, dataset, seed, device):
 
         # Policy action
         policy_obs = {
-            "rgb": obs["rgb"].to(device),
+            "rgb": crop_to_square(obs["rgb"]).to(device),
             "state": obs["state"].to(device),
         }
 
@@ -313,11 +332,18 @@ def collect_episode(env, agent, dataset, seed, device):
             policy_action.detach().cpu().numpy()
         )
 
-        # Convert action for dataset
-        action = convert_action_for_lerobot(
-            policy_action_np,
-            sim_state,
+        # Execute policy first so the agent controller computes the target qpos!
+        next_obs, reward, terminated, truncated, info = env.step(
+            policy_action_np
         )
+        
+        # Grab the absolute target joint positions from the controller
+        target_qpos = env.unwrapped.agent.controller._target_qpos
+        if torch.is_tensor(target_qpos):
+            target_qpos = target_qpos.detach().cpu().numpy()
+        
+        # Convert action for dataset using absolute target joint positions
+        action = convert_action_for_lerobot(target_qpos)
 
         # Record current state/action/image
         dataset.add_frame(
@@ -327,11 +353,8 @@ def collect_episode(env, agent, dataset, seed, device):
                 action=action,
             )
         )
-
-        # Execute policy
-        obs, reward, terminated, truncated, info = env.step(
-            policy_action_np
-        )
+        
+        obs = next_obs
 
         success = episode_is_successful(info)
 
