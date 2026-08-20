@@ -34,7 +34,22 @@ def main():
     follower = make_robot_from_config(follower_config)
     follower.connect()
 
-    print("\nRobot connected! Moving to starting position...")
+    print("\nRobot connected! Saving initial position...")
+    
+    # Save the absolute initial position of the robot to return to later
+    initial_pos_dict = follower.bus.sync_read("Present_Position")
+    while initial_pos_dict is None:
+        time.sleep(0.1)
+        initial_pos_dict = follower.bus.sync_read("Present_Position")
+        
+    initial_pos = [
+        initial_pos_dict["shoulder_pan"],
+        initial_pos_dict["shoulder_lift"],
+        initial_pos_dict["elbow_flex"],
+        initial_pos_dict["wrist_flex"],
+        initial_pos_dict["wrist_roll"],
+        initial_pos_dict["gripper"]
+    ]
     
     try:
         # Get the start and end indices of the requested episode
@@ -56,22 +71,8 @@ def main():
             
         print("Interpolating safely to the start position...")
         
-        # Get current position
-        current_pos_dict = follower.bus.sync_read("Present_Position")
-        
-        # Make sure the read was successful (sometimes serial returns None on the first try)
-        while current_pos_dict is None:
-            time.sleep(0.1)
-            current_pos_dict = follower.bus.sync_read("Present_Position")
-            
-        current_pos = [
-            current_pos_dict["shoulder_pan"],
-            current_pos_dict["shoulder_lift"],
-            current_pos_dict["elbow_flex"],
-            current_pos_dict["wrist_flex"],
-            current_pos_dict["wrist_roll"],
-            current_pos_dict["gripper"]
-        ]
+        # We already fetched initial_pos, so we just copy it for the first interpolation
+        current_pos = list(initial_pos)
         
         # Take 3 seconds (90 steps) to move to the starting position
         steps = 90
@@ -119,7 +120,34 @@ def main():
             progress = int(20 * (i - start_idx) / num_frames)
             print(f"\rReplaying: [{'='*progress}{' '*(20-progress)}] {i-start_idx}/{num_frames}", end="")
             
-        print("\n\nPlayback complete!")
+        print("\n\nPlayback complete! Returning to initial position...")
+        
+        # 3. Return safely to the initial resting position
+        current_pos_dict = follower.bus.sync_read("Present_Position")
+        while current_pos_dict is None:
+            time.sleep(0.1)
+            current_pos_dict = follower.bus.sync_read("Present_Position")
+            
+        current_pos = [
+            current_pos_dict["shoulder_pan"],
+            current_pos_dict["shoulder_lift"],
+            current_pos_dict["elbow_flex"],
+            current_pos_dict["wrist_flex"],
+            current_pos_dict["wrist_roll"],
+            current_pos_dict["gripper"]
+        ]
+        
+        for step in range(steps):
+            alpha = (step + 1) / steps
+            interpolated_action = {}
+            for i, name in enumerate(motor_names):
+                val = current_pos[i] + alpha * (initial_pos[i] - current_pos[i])
+                interpolated_action[f"{name}.pos"] = float(val)
+                
+            follower.send_action(interpolated_action)
+            time.sleep(1/30.0)
+            
+        print("Robot has returned to its initial position.")
         
     except KeyboardInterrupt:
         print("\n\nPlayback aborted by user.")

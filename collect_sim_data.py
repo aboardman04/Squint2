@@ -14,24 +14,24 @@ import gymnasium as gym
 # ================================================================
 
 # Environment
-ENV_ID = "SO101LiftCube-v1"
+ENV_ID = "LiftInstruments-v3"
 
 # Trained Squint checkpoint
-CHECKPOINT = "runs/lift_cube_1/ckpt.pt"
+CHECKPOINT = "runs/lift_instruments_6.8/ckpt.pt"
 
 # Number of SUCCESSFUL episodes to collect
-NUM_SUCCESSFUL_EPISODES = 5
+NUM_SUCCESSFUL_EPISODES = 500
 
-MAX_STEPS = 50
+MAX_STEPS = 60
 
 # Hugging Face dataset name
-REPO_ID = "aboardman/so101_lift_cube_sim_1"
+REPO_ID = "aboardman/so101_lift_instruments_sim100_2.1"
 
 # Set True only after verifying the local dataset
 PUSH_TO_HUB = True
 
 # Task description used in the dataset
-TASK_DESCRIPTION = "Lift the cube"
+TASK_DESCRIPTION = "Lift the metal instrument"
 
 # Camera settings -- match your real SO101 dataset
 CAMERA_WIDTH = 640
@@ -72,6 +72,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 logging.disable(level=logging.WARN)
 
 from mani_skill.utils.wrappers.flatten import FlattenRGBDObservationWrapper
+from utils import DownsampleObsWrapper
 import envs
 import mani_skill.envs
 from train_squint import DeployAgent
@@ -139,7 +140,19 @@ def convert_state_for_lerobot(sim_qpos):
     _gripper_servo_range = _gripper_servo_max - _gripper_servo_min
 
     sim_deg = state[5]
-    state[5] = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range + _gripper_servo_min
+    
+    # In ManiSkill, the gripper state ranges from ~-10 (open) to ~120 (closed) degrees.
+    # In the physical SO101 follower, the gripper servo physically stops around ~2 degrees (CLOSED) and goes up to ~90+ degrees (OPEN).
+    # Since we calibrated _gripper_servo_min to -62.5 in LeRobot originally, this math must be flipped!
+    # A smaller sim value (like -10, open) should map to ~90+ (open), and a larger sim value (like 120, closed) should map to ~2 (closed).
+    
+    # We invert the servo mapping range so the math flips
+    _gripper_servo_range_inverted = _gripper_servo_min - _gripper_servo_max
+    
+    servo_deg = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range_inverted + _gripper_servo_max
+    
+    # We clip the state to match the minimum mechanical limit of the real gripper (approx 2 degrees closed, 100 degrees open)
+    state[5] = np.clip(servo_deg, 2.0, 100.0)
 
     return state
 
@@ -165,7 +178,13 @@ def convert_action_for_lerobot(target_qpos_sim):
     _gripper_servo_range = _gripper_servo_max - _gripper_servo_min
 
     sim_deg = action_deg[5]
-    action_deg[5] = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range + _gripper_servo_min
+    # We invert the servo mapping range so the math flips
+    _gripper_servo_range_inverted = _gripper_servo_min - _gripper_servo_max
+    
+    servo_deg = (sim_deg - _gripper_sim_min) / _gripper_sim_range * _gripper_servo_range_inverted + _gripper_servo_max
+    
+    # Clip the action to the physical servo bounds to prevent wild out-of-bounds commands
+    action_deg[5] = np.clip(servo_deg, 2.0, 100.0)
     
     return action_deg
 
@@ -252,25 +271,15 @@ def make_environment():
         num_envs=1,
     )
 
-    return FlattenRGBDObservationWrapper(
+    env = FlattenRGBDObservationWrapper(
         env,
         rgb=True,
         depth=False,
         state=True,
     )
+    
+    return env
 
-
-def crop_to_square(rgb_tensor):
-    """Crop a batched RGB tensor (B, H, W, C) to a center square."""
-    B, H, W, C = rgb_tensor.shape
-    crop_size = min(H, W)
-    if W > H:
-        offset = (W - crop_size) // 2
-        return rgb_tensor[:, :, offset:offset + crop_size, :]
-    elif H > W:
-        offset = (H - crop_size) // 2
-        return rgb_tensor[:, offset:offset + crop_size, :, :]
-    return rgb_tensor
 
 # ================================================================
 # POLICY
@@ -279,9 +288,9 @@ def crop_to_square(rgb_tensor):
 def load_policy(env, obs, device):
     """Load the trained Squint policy."""
     
-    # We must crop the sample observation so the agent initializes correctly
+    # We must construct a dummy downsampled obs so the agent initializes correctly
     sample_obs = {
-        "rgb": crop_to_square(obs["rgb"]),
+        "rgb": torch.zeros((1, POLICY_IMAGE_SIZE, POLICY_IMAGE_SIZE, 3), dtype=torch.uint8, device=device),
         "state": obs["state"],
     }
     
@@ -320,8 +329,9 @@ def collect_episode(env, agent, dataset, seed, device):
         state = convert_state_for_lerobot(sim_state)
 
         # Policy action
+        # The agent natively downsamples internally via DeployAgent
         policy_obs = {
-            "rgb": crop_to_square(obs["rgb"]).to(device),
+            "rgb": obs["rgb"].to(device),
             "state": obs["state"].to(device),
         }
 
