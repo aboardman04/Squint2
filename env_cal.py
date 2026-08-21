@@ -34,11 +34,11 @@ OVERHEAD_CAMERA_FOV = np.deg2rad(60.0)
 # ==========================================
 # ⚙️ WRIST CAMERA HARDWARE V4L2 SETTINGS (/dev/video4)
 # ==========================================
-V4L2_WRIST_EXPOSURE = 48
-V4L2_WRIST_WB = 2947
-V4L2_WRIST_BRIGHTNESS = 55
-V4L2_WRIST_CONTRAST = 26
-V4L2_WRIST_SATURATION = 55
+V4L2_WRIST_EXPOSURE = 92
+V4L2_WRIST_WB = 3010
+V4L2_WRIST_BRIGHTNESS = 64
+V4L2_WRIST_CONTRAST = 64
+V4L2_WRIST_SATURATION = 54
 
 # ==========================================
 # ⚙️ OVERHEAD CAMERA HARDWARE V4L2 SETTINGS (/dev/video2)
