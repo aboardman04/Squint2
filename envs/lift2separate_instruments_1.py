@@ -1,5 +1,3 @@
-# I am trying to improve the physics of the instruments in this version, will also add envi visual constomization options
-
 from dataclasses import asdict, dataclass
 from typing import Any, Sequence, Union
 
@@ -22,11 +20,11 @@ from .robot.so101 import SO101
 class SeparateRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
     item_friction_range: Sequence[float] = (0.1, 0.5)
-    item_density_range: Sequence[float] = (7000, 7850)
+    item_density_range: Sequence[float] = (200, 200)#(7000, 7850)
     randomize_item_color: bool = False
 
 
-@register_env("LiftInstruments-v3", max_episode_steps=50)
+@register_env("LiftInstruments-v4", max_episode_steps=50)
 class Separate(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
@@ -131,7 +129,7 @@ class Separate(DefaultCameraEnv):
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
 
-    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose, density: Union[float, np.ndarray, list] = 1000.0):
+    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose): #, density: Union[float, np.ndarray, list] = 1000.0):
         # Use color from env_cal if available, otherwise default steel color
         base_color = (
             env_cal.INSTRUMENT_COLOR
@@ -154,15 +152,33 @@ class Separate(DefaultCameraEnv):
                 material=physx_material,
                 contact_offset=0.002,
                 rest_offset=0.001,
-                density=density,
+                # density=density,
             )
         except TypeError:
             builder.add_multiple_convex_collisions_from_file(
                 filename=obj_path,
                 decomposition="coacd",
                 material=physx_material,
-                density=density,
+                # density=density,
             )
+
+        # try:
+        #     # Switch decomposition to "vhacd" for tighter, more solid collision geometry on complex meshes,
+        #     # and increase contact_offset to detect collisions earlier and prevent tunneling.
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path, 
+        #         # decomposition="vhacd", 
+        #         material=physx_material,
+        #         contact_offset=0.02,  # Increased from 0.010 to register contacts earlier
+        #         rest_offset=0.001
+        #     )
+        # except TypeError:
+        #     # Fallback if specific decomposition keyword arguments differ in your version
+        #     builder.add_multiple_convex_collisions_from_file(
+        #         filename=obj_path, 
+        #         # decomposition="vhacd", 
+        #         material=physx_material
+        #     )
 
         mesh_center = self._get_mesh_center(obj_path)
         pose_pos = np.array(initial_pose.p, dtype=np.float32)
@@ -215,30 +231,42 @@ class Separate(DefaultCameraEnv):
 
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
-        self.table_pose = Pose.create_from_pq(p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2))
+        self.table_pose = Pose.create_from_pq(
+            p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2)
+        )
 
-        table_mat_color = (env_cal.TABLE_COLOR if env_cal and hasattr(env_cal, "TABLE_COLOR") else [0.1, 0.2, 0.85, 1.0])
-        mat_material = sapien.render.RenderMaterial(base_color=table_mat_color, roughness=0.6, metallic=0.0)
-        physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
+        table_mat_color = (
+            env_cal.TABLE_COLOR
+            if env_cal and hasattr(env_cal, "TABLE_COLOR")
+            else [0.1, 0.2, 0.85, 1.0]
+        )
+        mat_material = sapien.render.RenderMaterial(
+            base_color=table_mat_color, roughness=0.6, metallic=0.0
+        )
+        physx_material = sapien.physx.PhysxMaterial(
+            static_friction=0.6, dynamic_friction=0.5, restitution=0.1
+        )
         self.table_mat_half_size = [0.40, 0.80, 0.001]
         builder = self.scene.create_actor_builder()
-        builder.add_box_visual(half_size=self.table_mat_half_size, material=mat_material)
-        builder.add_box_collision(half_size=self.table_mat_half_size, material=physx_material)
+        builder.add_box_visual(
+            half_size=self.table_mat_half_size, material=mat_material
+        )
+        builder.add_box_collision(
+            half_size=self.table_mat_half_size, material=physx_material
+        )
         builder.initial_pose = sapien.Pose()
         self.table_mat = builder.build_kinematic("table_mat")
 
-        inst1_path = ("/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj")
+        inst1_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
         self.obj_1 = self._build_instrument(
             inst1_path,
             name="forceps_1",
             initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
-            density=densities,
         )
         self.obj_2 = self._build_instrument(
             inst1_path,
             name="forceps_2",
             initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
-            density=densities,
         )
 
         inst2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
@@ -246,13 +274,11 @@ class Separate(DefaultCameraEnv):
             inst2_path,
             name="allis_1",
             initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
-            density=densities,
         )
         self.obj_4 = self._build_instrument(
             inst2_path,
             name="allis_2",
             initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
-            density=densities,
         )
 
         self.objects = [self.obj_1, self.obj_2, self.obj_3, self.obj_4]
