@@ -43,8 +43,8 @@ class Separate(DefaultCameraEnv):
     instrument_spawn_xy_range = 0.02
     instrument_spawn_z_base = 0.008
     instrument_spawn_z_spacing = 0.007
-    instrument_separation = 0.12
-    num_instruments = 2
+    instrument_separation = 0 #0.12
+    num_instruments = 4
 
     SIM_FREQ = 200
     CONTROL_FREQ = 20
@@ -332,13 +332,15 @@ class Separate(DefaultCameraEnv):
             spawn_base = center[env_idx]
             spawn_base[:, 2] += 0.03
 
-            p1, q1, p2, q2 = self._sample_instrument_poses(b, spawn_base)
-            p2[:, 0] = p1[:, 0] + self.instrument_separation
-            p2[:, 1] = p1[:, 1]
+            p1, q1, p2, q2, p3, q3, p4, q4 = self._sample_instrument_poses(b, spawn_base)
+            # p2[:, 0] = p1[:, 0] + self.instrument_separation
+            # p2[:, 1] = p1[:, 1]
 
             self.obj_1.set_pose(Pose.create_from_pq(p=p1, q=q1))
             self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
-            self.target_object = self.obj_1
+            self.obj_3.set_pose(Pose.create_from_pq(p=p3, q=q3))
+            self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
+            # self.target_object = self.obj_1
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
