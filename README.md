@@ -71,10 +71,10 @@ Train an agent on the LiftCube task:
 
 ```bash
 python train_squint.py \
---env_id=SO101LiftCube-v1 \
---exp_name="checkpoint_name" \
---track \
---num_envs=128 
+    --env_id=SO101LiftCube-v1 \
+    --exp_name="checkpoint_name" \
+    --track \
+    --num_envs=128 
 ```
 This allows you to change the file name the policy is saved to, track it in wandb, and it reduces the number of environments being trained at once making it take longer to train but be able to train on less powerful GPUs. To use `--track` make sure you are logged into wandb in your terminal. The env_id is specific to the task you are training.
 Using `--checkpoint=runs/checkpoint_name/ckpt.pt` allows you to continue training an existing policy. 
@@ -182,7 +182,7 @@ of the tasks to match the real world objects.
 Edit `deploy_utils/robot_config.py` with your hardware settings. 
 
 ### Step 2: Tune Camera Alignment 
-Note: This step should have already been completed, the below is primarily relivant to the original squint configuration.
+Note: This step should have already been completed, before training to make sure the camera angle, colors, textures, etc, are as closely aligned with the real world as possible when the policy is training.
 
 Visual reinforcement learning agents are sensitive to slight visual changes. The more we reduce the difference, the better your agent will transfer. 
 We use a table with a black background. In ManiSkill3 simulation, we segment the objects of interest and replace the background with the image 
@@ -205,7 +205,6 @@ the wrist camera parameters, and then copy these parameters straight to wrist ca
 
 
 ### Step 3: Deploy
-
 Run your trained agent on the real robot:
 
 ```bash
