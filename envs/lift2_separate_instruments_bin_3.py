@@ -20,7 +20,7 @@ from .robot.so101 import SO101
 class SeparateRandomizationConfig(DefaultRandomizationConfig):
     robot_qpos_noise_std: float = np.deg2rad(5)
     item_friction_range: Sequence[float] = (0.1, 0.5)
-    item_density_range: Sequence[float] = (200, 200)
+    item_density_range: Sequence[float] = (200, 200)#(7000, 7850)
     randomize_item_color: bool = False
 
 
@@ -43,12 +43,17 @@ class Separate(DefaultCameraEnv):
     instrument_spawn_xy_range = 0.02
     instrument_spawn_z_base = 0.008
     instrument_spawn_z_spacing = 0.007
-    instrument_separation = 0
+    instrument_separation = 0 #0.12
     num_instruments = 4
-    block_half_size = [0.02, 0.02, 0.02]
 
+    #parameters to help improve physics of grasping instruments
     SIM_FREQ = 200
     CONTROL_FREQ = 20
+
+    block_half_size = [0.0075, 0.085, 0.085]
+    DROP_LOCATION = np.array([0.25, -0.30, 0.01])
+    DROP_ZONE_HEIGHT = 0.15
+    DROP_ZONE_WIDTH = 0.20
 
     def __init__(
         self,
@@ -57,15 +62,15 @@ class Separate(DefaultCameraEnv):
         control_mode="pd_joint_target_delta_pos",
         domain_randomization_config: Union[SeparateRandomizationConfig, dict] = SeparateRandomizationConfig(),
         domain_randomization=False,
-        sim_config=dict(
-            sim_freq=SIM_FREQ,
-            control_freq=CONTROL_FREQ,
-            scene_config=dict(
-                solver_position_iterations=20,
-                solver_velocity_iterations=2,
-                enable_ccd=True,
+            sim_config=dict(
+                sim_freq=SIM_FREQ,
+                control_freq=CONTROL_FREQ,
+                scene_config=dict(
+                    solver_position_iterations=20,
+                    solver_velocity_iterations=2,
+                    enable_ccd=True,
+                ),
             ),
-        ),
         **kwargs,
     ):
         self.base_z_rot = 0
@@ -129,7 +134,9 @@ class Separate(DefaultCameraEnv):
             return np.zeros(3, dtype=np.float32)
         return np.mean(np.stack(vertices, axis=0), axis=0)
 
-    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
+
+    def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose): #, density: Union[float, np.ndarray, list] = 1000.0):
+        # Use color from env_cal if available, otherwise default steel color
         base_color = (
             env_cal.INSTRUMENT_COLOR
             if env_cal and hasattr(env_cal, "INSTRUMENT_COLOR")
@@ -151,12 +158,14 @@ class Separate(DefaultCameraEnv):
                 material=physx_material,
                 contact_offset=0.002,
                 rest_offset=0.001,
+                # density=density,
             )
         except TypeError:
             builder.add_multiple_convex_collisions_from_file(
                 filename=obj_path,
                 decomposition="coacd",
                 material=physx_material,
+                # density=density,
             )
 
         mesh_center = self._get_mesh_center(obj_path)
@@ -168,24 +177,22 @@ class Separate(DefaultCameraEnv):
         builder.initial_pose = translated_pose
         return builder.build(name=name)
 
-    def _sample_instrument_poses(self, b: int, bin_base_pos: torch.Tensor):
-        """Samples spawn positions elevated slightly above the bin base."""
+    def _sample_instrument_poses(self, b: int, base_pos: torch.Tensor):
         poses = []
         for i in range(self.num_instruments):
             xyz = torch.zeros((b, 3), device=self.device)
             xyz[:, 0] = (
-                bin_base_pos[:, 0]
+                base_pos[:, 0]
                 + (torch.rand(b, device=self.device) * 2 - 1)
                 * self.instrument_spawn_xy_range
             )
             xyz[:, 1] = (
-                bin_base_pos[:, 1]
+                base_pos[:, 1]
                 + (torch.rand(b, device=self.device) * 2 - 1)
                 * self.instrument_spawn_xy_range
             )
             xyz[:, 2] = (
-                bin_base_pos[:, 2]
-                + 0.01
+                base_pos[:, 2]
                 + self.instrument_spawn_z_base
                 + i * self.instrument_spawn_z_spacing
             )
@@ -196,6 +203,36 @@ class Separate(DefaultCameraEnv):
             q[:, 3] = torch.sin(yaw / 2)
             poses.extend([xyz, q])
         return tuple(poses)
+
+    def _build_drop_zone_outline(self, half_width: float, half_height: float, thickness: float = 0.0025):
+        builder = self.scene.create_actor_builder()
+        green_material = sapien.render.RenderMaterial(
+            base_color=[0.0, 0.8, 0.2, 0.8],
+            roughness=0.1,
+            metallic=0.0
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, -half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[-half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.initial_pose = sapien.Pose()
+        return builder.build_kinematic("drop_zone_outline")
 
     def _load_scene(self, options: dict):
         cfg = self.domain_randomization_config
@@ -215,6 +252,22 @@ class Separate(DefaultCameraEnv):
         self.table_pose = Pose.create_from_pq(
             p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2)
         )
+
+        self.drop_zone_visual = self._build_drop_zone_outline(
+            half_width=self.DROP_ZONE_WIDTH, 
+            half_height=self.DROP_ZONE_HEIGHT, 
+            thickness=0.00025
+        )
+
+        bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/bin_2.obj"
+        bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
+        bin_steel_material = sapien.render.RenderMaterial(base_color=[1, 1, 1, 1.0], roughness=0.15, metallic=0.5)
+        physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
+        builder = self.scene.create_actor_builder()
+        builder.add_visual_from_file(filename=bin_path, material=bin_steel_material)
+        builder.add_multiple_convex_collisions_from_file(filename=bin_path, decomposition="coacd", material=physx_material)
+        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
+        self.bin = builder.build_kinematic("bin")
 
         table_mat_color = (
             env_cal.TABLE_COLOR
@@ -238,45 +291,6 @@ class Separate(DefaultCameraEnv):
         builder.initial_pose = sapien.Pose()
         self.table_mat = builder.build_kinematic("table_mat")
 
-        # Bin Mesh Loader
-        bin_obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/bin.obj"
-        builder_bin = self.scene.create_actor_builder()
-        builder_bin.add_visual_from_file(
-            filename=bin_obj_path,
-            material=sapien.render.RenderMaterial(
-                base_color=[0.2, 0.2, 0.25, 1.0], roughness=0.4, metallic=0.1
-            ),
-        )
-        try:
-            builder_bin.add_multiple_convex_collisions_from_file(
-                filename=bin_obj_path,
-                decomposition="coacd",
-                material=physx_material,
-            )
-        except TypeError:
-            builder_bin.add_nonconvex_collision_from_file(
-                filename=bin_obj_path,
-                material=physx_material,
-            )
-        builder_bin.initial_pose = sapien.Pose()
-        self.bin = builder_bin.build_kinematic("bin")
-
-        # Drop Zone Target Plate
-        drop_zone_mat = sapien.render.RenderMaterial(
-            base_color=[0.15, 0.7, 0.2, 1.0], roughness=0.5, metallic=0.0
-        )
-        self.drop_zone_half_size = [0.10, 0.15, 0.001]
-        builder_dz = self.scene.create_actor_builder()
-        builder_dz.add_box_visual(
-            half_size=self.drop_zone_half_size, material=drop_zone_mat
-        )
-        builder_dz.add_box_collision(
-            half_size=self.drop_zone_half_size, material=physx_material
-        )
-        builder_dz.initial_pose = sapien.Pose()
-        self.drop_zone = builder_dz.build_kinematic("drop_zone")
-
-        # Instrument mesh definitions
         inst1_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
         self.obj_1 = self._build_instrument(
             inst1_path,
@@ -303,7 +317,6 @@ class Separate(DefaultCameraEnv):
 
         self.objects = [self.obj_1, self.obj_2, self.obj_3, self.obj_4]
         self.target_object = self.obj_1
-        self.obj = self.obj_1
 
         self._load_camera_mount()
         self._randomize_robot_color()
@@ -336,7 +349,6 @@ class Separate(DefaultCameraEnv):
             else:
                 table_z = torch.full((b,), 0.92, device=self.device)
 
-            # Mat Pose
             mat_pos = torch.zeros((b, 3), device=self.device)
             mat_pos[:, 0] = 0.450
             mat_pos[:, 1] = -0.275
@@ -348,14 +360,6 @@ class Separate(DefaultCameraEnv):
             )
             self.table_mat.set_pose(Pose.create_from_pq(p=mat_pos, q=mat_q))
 
-            # Drop Zone Target Plate Pose
-            drop_zone_pos = torch.zeros((b, 3), device=self.device)
-            drop_zone_pos[:, 0] = 0.350
-            drop_zone_pos[:, 1] = 0.30
-            drop_zone_pos[:, 2] = table_z + float(self.drop_zone_half_size[2])
-            self.drop_zone.set_pose(Pose.create_from_pq(p=drop_zone_pos, q=mat_q))
-
-            # Requested Bin and Instrument Spawn Logic
             center = self.agent.robot.pose.p + torch.tensor([0.3, 0.0, 0.0], device=self.device)
             center = center[env_idx]
             bin_pos = center.clone()
@@ -366,14 +370,22 @@ class Separate(DefaultCameraEnv):
             bin_pose = Pose.create_from_pq(p=bin_pos, q=q_tensor)
             self.bin.set_pose(bin_pose)
 
-            spawn_base = bin_pos.clone()
+            spawn_base = bin_pos.clone() #spawn_base = center[env_idx]
             spawn_base[:, 2] += 0.03
+
             p1, q1, p2, q2, p3, q3, p4, q4 = self._sample_instrument_poses(b, spawn_base)
+            # p2[:, 0] = p1[:, 0] + self.instrument_separation
+            # p2[:, 1] = p1[:, 1]
+
             self.obj_1.set_pose(Pose.create_from_pq(p=p1, q=q1))
             self.obj_2.set_pose(Pose.create_from_pq(p=p2, q=q2))
             self.obj_3.set_pose(Pose.create_from_pq(p=p3, q=q3))
             self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
-            self.obj = self.obj_1
+            # self.target_object = self.obj_1
+
+            drop_pos = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32).repeat(b, 1)
+            drop_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(b, 1)
+            self.drop_zone_visual.set_pose(Pose.create_from_pq(p=drop_pos, q=drop_q))
 
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
@@ -394,12 +406,16 @@ class Separate(DefaultCameraEnv):
 
     def _get_obs_extra(self, info: dict):
         obs = dict()
+        # Stack positions of all objects to compute distances to TCP
+        # Shape: (num_envs, num_instruments, 3)
         all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
-        tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1)
+        tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1) # Shape: (num_envs, 1, 3)
         
+        # Distance to each instrument
         dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
         min_dist_to_item, min_dist_idx = torch.min(dists_to_items, dim=1)
         
+        # Closest item position and pose
         closest_obj_pos = all_obj_positions[torch.arange(self.num_envs, device=self.device), min_dist_idx]
         
         tcp_velocity = (self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2
@@ -428,6 +444,7 @@ class Separate(DefaultCameraEnv):
         return obs
 
     def evaluate(self):
+        # Calculate distance to all objects and take the minimum across items
         all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
         tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1)
         dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
@@ -435,6 +452,7 @@ class Separate(DefaultCameraEnv):
         
         reached_object = min_dist_to_item < 0.03
 
+        # Check if ANY instrument is currently grasped or lifted
         is_item_grasped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         item_lifted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
@@ -462,6 +480,7 @@ class Separate(DefaultCameraEnv):
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        # Compute distance to closest instrument
         all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
         tcp_pos_expanded = self.agent.tcp_pose.p.unsqueeze(1)
         dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
