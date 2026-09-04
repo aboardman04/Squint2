@@ -1,17 +1,22 @@
 from dataclasses import asdict, dataclass
-from typing import Any, Sequence, Union
+from typing import Any, Optional, Sequence, Union
 
 import dacite
 import numpy as np
 import sapien
 import torch
+import torch.random
 from transforms3d.euler import euler2quat
-import env_cal
+
 from mani_skill.agents.robots import Fetch, Panda
-from mani_skill.utils import common
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils import common, sapien_utils
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.scene_builder.table import TableSceneBuilder
 from mani_skill.utils.structs import Pose
+from mani_skill.utils.structs.types import GPUMemoryConfig, SimConfig
+
+# Base randomization imports
 from .base_random_env import DefaultCameraEnv, DefaultRandomizationConfig
 from .robot.so101 import SO101
 
@@ -24,7 +29,7 @@ class SeparateRandomizationConfig(DefaultRandomizationConfig):
     randomize_item_color: bool = False
 
 
-@register_env("LiftInstruments-v6", max_episode_steps=50)
+@register_env("SeparateInstruments-v6", max_episode_steps=500)
 class Separate(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
@@ -43,40 +48,30 @@ class Separate(DefaultCameraEnv):
     instrument_spawn_xy_range = 0.02
     instrument_spawn_z_base = 0.008
     instrument_spawn_z_spacing = 0.007
-    instrument_separation = 0
     num_instruments = 4
-    block_half_size = [0.02, 0.02, 0.02]
-
-    SIM_FREQ = 200
-    CONTROL_FREQ = 20
+    block_half_size = [0.0075, 0.085, 0.085]
+    DROP_LOCATION = np.array([0.25, -0.30, 0.01])
+    DROP_ZONE_HEIGHT = 0.15
+    DROP_ZONE_WIDTH = 0.20
 
     def __init__(
         self,
         *args,
         robot_uids="so101",
         control_mode="pd_joint_target_delta_pos",
-        domain_randomization_config: Union[SeparateRandomizationConfig, dict] = SeparateRandomizationConfig(),
+        robot_init_qpos_noise=0.02,
         domain_randomization=False,
-        sim_config=dict(
-            sim_freq=SIM_FREQ,
-            control_freq=CONTROL_FREQ,
-            scene_config=dict(
-                solver_position_iterations=20,
-                solver_velocity_iterations=2,
-                enable_ccd=True,
-            ),
-        ),
+        domain_randomization_config=None,
         **kwargs,
     ):
+        self.robot_init_qpos_noise = robot_init_qpos_noise
         self.base_z_rot = 0
         self.rest_qpos = SO101.keyframes["start"].qpos.tolist()
 
         self.domain_randomization_config = SeparateRandomizationConfig()
-        merged_domain_randomization_config = asdict(self.domain_randomization_config)
+        merged_domain_randomization_config = self.domain_randomization_config.dict()
         if isinstance(domain_randomization_config, dict):
-            common.dict_merge(
-                merged_domain_randomization_config, domain_randomization_config
-            )
+            common.dict_merge(merged_domain_randomization_config, domain_randomization_config)
             self.domain_randomization_config = dacite.from_dict(
                 data_class=SeparateRandomizationConfig,
                 data=merged_domain_randomization_config,
@@ -94,98 +89,74 @@ class Separate(DefaultCameraEnv):
             **kwargs,
         )
 
+    @property
+    def _default_sim_config(self):
+        return SimConfig(
+            gpu_memory_config=GPUMemoryConfig(found_lost_pairs_capacity=2**25, max_rigid_patch_count=2**18)
+        )
+
+    # @property
+    # def _default_human_render_camera_configs(self):
+    #     pose = sapien_utils.look_at([0.6, 0.7, 0.6], [0.0, 0.0, 0.35])
+    #     return CameraConfig(
+    #         "render_camera",
+    #         pose=pose,
+    #         width=512,
+    #         height=512,
+    #         fov=1,
+    #         near=0.01,
+    #         far=100,
+    #     )
+
     def _load_agent(self, options: dict):
+        # load the robot arm at this initial pose
         super()._load_agent(
             options,
             sapien.Pose(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot)),
             build_separate=True
             if self.domain_randomization
-            and getattr(self.domain_randomization_config, "robot_color", None) == "random"
+            and self.domain_randomization_config.robot_color == "random"
             else False,
         )
 
-    def _load_camera_mount(self):
-        """Matches the wrist camera alignment from LiftCube exactly."""
-        super()._load_camera_mount()
-        if hasattr(self, "wrist_camera") and self.wrist_camera is not None:
-            pos = getattr(env_cal, "WRIST_CAMERA_BASE_POS", (-0.0130, 0.0520, -0.0520))
-            rot = getattr(env_cal, "WRIST_CAMERA_BASE_ROT_RAD", (np.deg2rad(-101.0), np.deg2rad(81.0), np.deg2rad(-31.0)))
-            fov = getattr(env_cal, "WRIST_CAMERA_FOV", np.deg2rad(71.0))
-            
-            self.wrist_camera.set_local_pose(sapien.Pose(p=pos, q=euler2quat(*rot)))
-            if hasattr(self.wrist_camera, "set_fov"):
-                self.wrist_camera.set_fov(fov)
-
-    def _get_mesh_center(self, obj_path: str) -> np.ndarray:
-        vertices = []
-        with open(obj_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("v "):
-                    parts = line.split()
-                    if len(parts) >= 4:
-                        vertices.append(np.array(parts[1:4], dtype=np.float32))
-        if not vertices:
-            return np.zeros(3, dtype=np.float32)
-        return np.mean(np.stack(vertices, axis=0), axis=0)
-
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose):
-        base_color = (
-            env_cal.INSTRUMENT_COLOR
-            if env_cal and hasattr(env_cal, "INSTRUMENT_COLOR")
-            else [0.44, 0.44, 0.44, 1.0]
-        )
         steel_material = sapien.render.RenderMaterial(
-            base_color=base_color, roughness=0.15, metallic=0.5
+            base_color=[0.44, 0.44, 0.44, 1.0],
+            roughness=0.15,
+            metallic=1.0,
         )
         physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.5, dynamic_friction=0.4, restitution=0.003
+            static_friction=0.6,
+            dynamic_friction=0.5,
+            restitution=0.1,
         )
+
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=obj_path, material=steel_material)
-
-        try:
-            builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path,
-                decomposition="coacd",
-                material=physx_material,
-                contact_offset=0.002,
-                rest_offset=0.001,
-            )
-        except TypeError:
-            builder.add_multiple_convex_collisions_from_file(
-                filename=obj_path,
-                decomposition="coacd",
-                material=physx_material,
-            )
-
-        mesh_center = self._get_mesh_center(obj_path)
-        pose_pos = np.array(initial_pose.p, dtype=np.float32)
-        translated_pose = sapien.Pose(
-            p=(pose_pos - mesh_center).tolist(),
-            q=initial_pose.q,
+        builder.add_multiple_convex_collisions_from_file(
+            filename=obj_path,
+            decomposition="coacd",
+            material=physx_material,
         )
-        builder.initial_pose = translated_pose
+        builder.initial_pose = initial_pose
         return builder.build(name=name)
 
-    def _sample_instrument_poses(self, b: int, bin_base_pos: torch.Tensor):
-        """Samples spawn positions elevated slightly above the bin base."""
+    def _sample_instrument_poses(self, b: int, base_pos: torch.Tensor):
         poses = []
         for i in range(self.num_instruments):
             xyz = torch.zeros((b, 3), device=self.device)
             xyz[:, 0] = (
-                bin_base_pos[:, 0]
+                base_pos[:, 0]
                 + (torch.rand(b, device=self.device) * 2 - 1)
                 * self.instrument_spawn_xy_range
             )
             xyz[:, 1] = (
-                bin_base_pos[:, 1]
+                base_pos[:, 1]
                 + (torch.rand(b, device=self.device) * 2 - 1)
                 * self.instrument_spawn_xy_range
             )
             xyz[:, 2] = (
-                bin_base_pos[:, 2]
-                + 0.01
+                base_pos[:, 2]
                 + self.instrument_spawn_z_base
                 + i * self.instrument_spawn_z_spacing
             )
@@ -197,87 +168,75 @@ class Separate(DefaultCameraEnv):
             poses.extend([xyz, q])
         return tuple(poses)
 
-    def _load_scene(self, options: dict):
-        cfg = self.domain_randomization_config
-        frictions = (
-            np.ones(self.num_envs)
-            * (cfg.item_friction_range[0] + cfg.item_friction_range[1])
-            / 2
+    def _build_drop_zone_outline(self, half_width: float, half_height: float, thickness: float = 0.0025):
+        """Creates a thin rectangular border marking the drop zone on the table surface."""
+        builder = self.scene.create_actor_builder()
+        green_material = sapien.render.RenderMaterial(
+            base_color=[0.0, 0.8, 0.2, 0.8],
+            roughness=0.1,
+            metallic=0.0
         )
-        densities = (
-            np.ones(self.num_envs)
-            * (cfg.item_density_range[0] + cfg.item_density_range[1])
-            / 2
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
         )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[0.0, -half_height, 0.0]),
+            half_size=[half_width + thickness, thickness, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.add_box_visual(
+            pose=sapien.Pose(p=[-half_width, 0.0, 0.0]),
+            half_size=[thickness, half_height, thickness],
+            material=green_material,
+        )
+        builder.initial_pose = sapien.Pose()
+        return builder.build_kinematic("drop_zone_outline")
 
+    def _load_scene(self, options: dict):
         self.table_scene = TableSceneBuilder(self)
         self.table_scene.build()
-        self.table_pose = Pose.create_from_pq(
-            p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2)
+        self.table_pose = Pose.create_from_pq(p=[-0.12 + 0.737, 0, -0.9196429], q=euler2quat(0, 0, np.pi / 2))
+        
+        self.drop_zone_visual = self._build_drop_zone_outline(
+            half_width=self.DROP_ZONE_WIDTH, 
+            half_height=self.DROP_ZONE_HEIGHT, 
+            thickness=0.00025
         )
 
-        table_mat_color = (
-            env_cal.TABLE_COLOR
-            if env_cal and hasattr(env_cal, "TABLE_COLOR")
-            else [0.1, 0.2, 0.85, 1.0]
-        )
-        mat_material = sapien.render.RenderMaterial(
-            base_color=table_mat_color, roughness=0.6, metallic=0.0
-        )
-        physx_material = sapien.physx.PhysxMaterial(
-            static_friction=0.6, dynamic_friction=0.5, restitution=0.1
-        )
+        blue_material = sapien.render.RenderMaterial(base_color=[0.1, 0.2, 0.85, 1.0], roughness=0.6, metallic=0.0)
         self.table_mat_half_size = [0.40, 0.80, 0.001]
         builder = self.scene.create_actor_builder()
-        builder.add_box_visual(
-            half_size=self.table_mat_half_size, material=mat_material
-        )
-        builder.add_box_collision(
-            half_size=self.table_mat_half_size, material=physx_material
-        )
+        builder.add_box_visual(half_size=self.table_mat_half_size, material=blue_material)
         builder.initial_pose = sapien.Pose()
         self.table_mat = builder.build_kinematic("table_mat")
 
-        # Bin Mesh Loader
-        bin_obj_path = "/home/aboardman/squint2/deploy_utils/blender_objs/bin.obj"
-        builder_bin = self.scene.create_actor_builder()
-        builder_bin.add_visual_from_file(
-            filename=bin_obj_path,
-            material=sapien.render.RenderMaterial(
-                base_color=[0.2, 0.2, 0.25, 1.0], roughness=0.4, metallic=0.1
-            ),
-        )
-        try:
-            builder_bin.add_multiple_convex_collisions_from_file(
-                filename=bin_obj_path,
-                decomposition="coacd",
-                material=physx_material,
-            )
-        except TypeError:
-            builder_bin.add_nonconvex_collision_from_file(
-                filename=bin_obj_path,
-                material=physx_material,
-            )
-        builder_bin.initial_pose = sapien.Pose()
-        self.bin = builder_bin.build_kinematic("bin")
+        builder = self.scene.create_actor_builder()
+        builder.initial_pose = sapien.Pose()
+        self.camera_mount = builder.build_kinematic("camera_mount")
 
-        # Drop Zone Target Plate
-        drop_zone_mat = sapien.render.RenderMaterial(
-            base_color=[0.15, 0.7, 0.2, 1.0], roughness=0.5, metallic=0.0
-        )
-        self.drop_zone_half_size = [0.10, 0.15, 0.001]
-        builder_dz = self.scene.create_actor_builder()
-        builder_dz.add_box_visual(
-            half_size=self.drop_zone_half_size, material=drop_zone_mat
-        )
-        builder_dz.add_box_collision(
-            half_size=self.drop_zone_half_size, material=physx_material
-        )
-        builder_dz.initial_pose = sapien.Pose()
-        self.drop_zone = builder_dz.build_kinematic("drop_zone")
+        builder = self.scene.create_actor_builder()
+        builder.initial_pose = sapien.Pose()
+        self.wrist_camera_mount = builder.build_kinematic("wrist_camera_mount")
 
-        # Instrument mesh definitions
+        bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/box.obj"
+        bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
+        bin_steel_material = sapien.render.RenderMaterial(base_color=[1, 1, 1, 1.0], roughness=0.15, metallic=0.5)
+        physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
+        builder = self.scene.create_actor_builder()
+        builder.add_visual_from_file(filename=bin_path, material=bin_steel_material)
+        builder.add_multiple_convex_collisions_from_file(filename=bin_path, decomposition="coacd", material=physx_material)
+        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
+        self.bin = builder.build_kinematic("bin")
+
         inst1_path = "/home/aboardman/squint2/deploy_utils/blender_objs/dressing_forceps.obj"
+        inst2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
         self.obj_1 = self._build_instrument(
             inst1_path,
             name="forceps_1",
@@ -286,31 +245,20 @@ class Separate(DefaultCameraEnv):
         self.obj_2 = self._build_instrument(
             inst1_path,
             name="forceps_2",
-            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1]),
         )
-
-        inst2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
         self.obj_3 = self._build_instrument(
             inst2_path,
             name="allis_1",
-            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1]),
         )
         self.obj_4 = self._build_instrument(
             inst2_path,
             name="allis_2",
-            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1]),
         )
-
         self.objects = [self.obj_1, self.obj_2, self.obj_3, self.obj_4]
-        self.target_object = self.obj_1
         self.obj = self.obj_1
-
-        self._load_camera_mount()
-        self._randomize_robot_color()
-        self.rest_qpos = common.to_tensor(self.rest_qpos, device=self.device)
-
-        self.item_frictions = common.to_tensor(frictions, device=self.device)
-        self.item_densities = common.to_tensor(densities, device=self.device)
 
     def _initialize_episode(self, env_idx: torch.Tensor, options: dict):
         super()._initialize_episode(env_idx, options)
@@ -319,43 +267,20 @@ class Separate(DefaultCameraEnv):
             self.table_scene.initialize(env_idx)
             self.table_scene.table.set_pose(self.table_pose)
 
-            self.agent.robot.set_qpos(
-                self.rest_qpos
-                + torch.randn(size=(b, self.rest_qpos.shape[-1]))
-                * self.domain_randomization_config.initial_qpos_noise_scale
-            )
-            self.agent.robot.set_pose(
-                Pose.create_from_pq(p=[0, 0, 0], q=euler2quat(0, 0, self.base_z_rot))
-            )
-
             if hasattr(self.table_scene, "table"):
                 table_z = self.table_scene.table.pose.p[..., 2]
                 if table_z.ndim == 0:
                     table_z = table_z.unsqueeze(0)
                 table_z = table_z + 0.92
             else:
-                table_z = torch.full((b,), 0.92, device=self.device)
-
-            # Mat Pose
+                table_z = torch.full((b,), float(self.block_half_size[2]) + 0.92, device=self.device)
             mat_pos = torch.zeros((b, 3), device=self.device)
             mat_pos[:, 0] = 0.450
             mat_pos[:, 1] = -0.275
             mat_pos[:, 2] = table_z + float(self.table_mat_half_size[2])
-            mat_q = (
-                torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
-                .unsqueeze(0)
-                .repeat(b, 1)
-            )
+            mat_q = (torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).unsqueeze(0).repeat(b, 1))
             self.table_mat.set_pose(Pose.create_from_pq(p=mat_pos, q=mat_q))
 
-            # Drop Zone Target Plate Pose
-            drop_zone_pos = torch.zeros((b, 3), device=self.device)
-            drop_zone_pos[:, 0] = 0.350
-            drop_zone_pos[:, 1] = 0.30
-            drop_zone_pos[:, 2] = table_z + float(self.drop_zone_half_size[2])
-            self.drop_zone.set_pose(Pose.create_from_pq(p=drop_zone_pos, q=mat_q))
-
-            # Requested Bin and Instrument Spawn Logic
             center = self.agent.robot.pose.p + torch.tensor([0.3, 0.0, 0.0], device=self.device)
             center = center[env_idx]
             bin_pos = center.clone()
@@ -375,16 +300,14 @@ class Separate(DefaultCameraEnv):
             self.obj_4.set_pose(Pose.create_from_pq(p=p4, q=q4))
             self.obj = self.obj_1
 
+            drop_pos = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32).repeat(b, 1)
+            drop_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(b, 1)
+            self.drop_zone_visual.set_pose(Pose.create_from_pq(p=drop_pos, q=drop_q))
+
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
-        if (
-            self.domain_randomization
-            and self.domain_randomization_config.robot_qpos_noise_std > 0
-        ):
-            noise = (
-                torch.randn_like(qpos)
-                * self.domain_randomization_config.robot_qpos_noise_std
-            )
+        if (self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0):
+            noise = (torch.randn_like(qpos) * self.domain_randomization_config.robot_qpos_noise_std)
             qpos = qpos + noise
         obs = dict(noisy_qpos=qpos)
         controller_state = self.agent.controller.get_state()
@@ -392,122 +315,191 @@ class Separate(DefaultCameraEnv):
             obs.update(controller=controller_state)
         return obs
 
-    def _get_obs_extra(self, info: dict):
-        obs = dict()
-        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
-        tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1)
-        
-        dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
-        min_dist_to_item, min_dist_idx = torch.min(dists_to_items, dim=1)
-        
-        closest_obj_pos = all_obj_positions[torch.arange(self.num_envs, device=self.device), min_dist_idx]
-        
-        tcp_velocity = (self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2
+    # Distance / Clearance Helper Stubs
+    def compute_gripper_to_bin_clearance(self) -> torch.Tensor:
+        return torch.linalg.norm(self.agent.tcp_pos - self.bin.pose.p, dim=-1)
 
-        obs.update(
-            tcp_pose=self.agent.tcp_pose.raw_pose,
-            target_item_pose=closest_obj_pos,
-            tcp_to_item_pos=closest_obj_pos - self.agent.tcp_pos,
-            tcp_to_item_dist=min_dist_to_item,
-            tcp_velocity=tcp_velocity,
-            is_item_grasped=info.get("is_item_grasped", torch.stack([self.agent.is_grasping(obj) for obj in self.objects], dim=1).any(dim=1)),
-            robot_touching_mat=self.agent.is_touching(self.table_mat).float(),
-            dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1],
+    def compute_gripper_to_table_clearance(self) -> torch.Tensor:
+        return torch.abs(self.agent.tcp_pos[..., 2] - 0.02)
+
+    def compute_grasped_to_bin_clearance(self, obj) -> torch.Tensor:
+        return torch.linalg.norm(obj.pose.p - self.bin.pose.p, dim=-1)
+
+    def is_object_visible(self, obj) -> torch.Tensor:
+        return torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def is_object_occluded(self, obj) -> torch.Tensor:
+        return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def is_inside_bin(self, obj) -> torch.Tensor:
+        bin_xy = self.bin.pose.p[..., :2]
+        obj_xy = obj.pose.p[..., :2]
+        return torch.linalg.norm(obj_xy - bin_xy, dim=-1) < (self.block_half_size[1] + 0.05)
+
+    def is_touching_other_object(self, obj) -> torch.Tensor:
+        return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def is_grasped(self, obj) -> torch.Tensor:
+        return self.agent.is_grasping(obj)
+
+    def _get_obs_extra(self, info: dict):
+        obs = dict(tcp_pose=self.agent.tcp_pose.raw_pose)
+
+        DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
+
+        gripper_to_bin = self.compute_gripper_to_bin_clearance()
+        gripper_to_table = self.compute_gripper_to_table_clearance()
+
+        all_distances = []
+        all_occluded = []
+
+        for obj in self.objects:
+            dist = torch.linalg.norm(obj.pose.p - self.agent.tcp_pos, dim=-1)
+            occluded = self.is_object_occluded(obj)
+            all_distances.append(dist)
+            all_occluded.append(occluded)
+
+        distances_tensor = torch.stack(all_distances, dim=0)
+        occluded_tensor = torch.stack(all_occluded, dim=0)
+
+        unoccluded_distances = torch.where(
+            ~occluded_tensor,
+            distances_tensor,
+            torch.tensor(float("inf"), device=self.device),
         )
 
-        if self.domain_randomization:
-            gripper_params = self.get_gripper_params()
+        target_obj_idx = torch.argmin(unoccluded_distances, dim=0)
+
+        all_are_occluded = torch.all(occluded_tensor, dim=0)
+        closest_overall_idx = torch.argmin(distances_tensor, dim=0)
+
+        target_obj_idx = torch.where(
+            all_are_occluded,
+            closest_overall_idx,
+            target_obj_idx,
+        )
+
+        obs["target_obj"] = target_obj_idx.long() + 1
+
+        for i, obj in enumerate(self.objects):
+            prefix = f"obj{i+1}"
+
+            obj_pos = obj.pose.p
+            obj_quat = obj.pose.q
+
+            visible = self.is_object_visible(obj)
+            occluded = self.is_object_occluded(obj)
+            inside_bin = self.is_inside_bin(obj)
+            touching = self.is_touching_other_object(obj)
+            grasped = self.is_grasped(obj)
+
+            tcp_dist = distances_tensor[i]
+            drop_distance = torch.linalg.norm(obj_pos - DROP_LOCATION, dim=-1)
+
+            grasped_bin_dist = self.compute_grasped_to_bin_clearance(obj)
+            gripper_min_dist = torch.minimum(gripper_to_table, gripper_to_bin)
+
+            nearest_collision_float = torch.where(grasped, grasped_bin_dist, gripper_min_dist)
+            nearest_collision = nearest_collision_float.round().long()
+
             obs.update(
-                clean_qpos=self.agent.robot.get_qpos(),
-                item_friction=self.item_frictions,
-                item_density=self.item_densities,
-                gripper_stiffness=gripper_params["gripper_stiffness"],
-                gripper_damping=gripper_params["gripper_damping"],
+                {
+                    f"{prefix}_visible": visible.float(),
+                    f"{prefix}_occluded": occluded.float(),
+                    f"{prefix}_inside_bin": inside_bin.float(),
+                    f"{prefix}_touching": touching.float(),
+                    f"{prefix}_grasped": grasped.float(),
+                    f"{prefix}_nearest_collision": nearest_collision,
+                    f"{prefix}_distance_to_gripper": tcp_dist,
+                    f"{prefix}_orientation": obj_quat,
+                    f"{prefix}_distance_to_drop": drop_distance * grasped.float(),
+                }
             )
 
         return obs
 
     def evaluate(self):
-        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
-        tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1)
-        dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
-        min_dist_to_item, _ = torch.min(dists_to_items, dim=1)
-        
-        reached_object = min_dist_to_item < 0.03
+        poses_xy = [obj.pose.p[..., :2] for obj in self.objects]
 
-        is_item_grasped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        item_lifted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        all_separated = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        for i in range(self.num_instruments):
+            for j in range(i + 1, self.num_instruments):
+                dist = torch.linalg.norm(poses_xy[i] - poses_xy[j], dim=-1)
+                all_separated = all_separated & (dist > 0.15)
+
+        bin_xy = self.bin.pose.p[..., :2]
+        if bin_xy.ndim == 1:
+            bin_xy = bin_xy.unsqueeze(0)
+
+        bin_half_size = self.block_half_size[1]
+
+        all_outside_bin = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        all_on_table = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
         for obj in self.objects:
-            is_item_grasped = is_item_grasped | self.agent.is_grasping(obj)
-            item_lifted = item_lifted | (obj.pose.p[..., -1] >= 0.04)
+            obj_xy = obj.pose.p[..., :2]
+            obj_z = obj.pose.p[..., 2]
 
-        target_qpos = self.agent.controller._target_qpos.clone()
-        distance_to_rest_qpos = torch.linalg.norm(
-            target_qpos[:, :-1] - self.rest_qpos[:-1], axis=-1
-        )
-        reached_rest_qpos = distance_to_rest_qpos < 0.2
+            dist_to_bin = torch.linalg.norm(obj_xy - bin_xy, dim=-1)
+            outside_bin = dist_to_bin > (bin_half_size + 0.05)
+            on_table = (obj_z < 0.04) & (obj_z > -0.01)
 
-        robot_touching_mat = self.agent.is_touching(self.table_mat)
+            all_outside_bin = all_outside_bin & outside_bin
+            all_on_table = all_on_table & on_table
 
-        success = item_lifted & is_item_grasped & reached_rest_qpos
+        success = all_separated & all_outside_bin & all_on_table
 
         return {
-            "is_item_grasped": is_item_grasped,
-            "reached_object": reached_object,
-            "distance_to_rest_qpos": distance_to_rest_qpos,
-            "robot_touching_mat": robot_touching_mat,
-            "item_lifted": item_lifted,
             "success": success,
+            "all_separated": all_separated,
+            "all_outside_bin": all_outside_bin,
+            "all_on_table": all_on_table,
         }
 
-    def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
-        tcp_pos_expanded = self.agent.tcp_pose.p.unsqueeze(1)
-        dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
-        min_tcp_to_item_dist, _ = torch.min(dists_to_items, dim=1)
+    def compute_dense_reward(self, obs: Any, action: Any, info: dict):
+        reward = torch.zeros((self.num_envs,), device=self.device)
+        DROP_LOCATION = torch.tensor(self.DROP_LOCATION, device=self.device, dtype=torch.float32)
 
-        reaching_reward = 1.0 - torch.tanh(5.0 * min_tcp_to_item_dist)
-        reward = reaching_reward.clone()
+        batch_idx = torch.arange(self.num_envs, device=self.device)
 
-        approach_weight = torch.clamp(min_tcp_to_item_dist / 0.15, 0.0, 1.0)
-        tcp_velocity = torch.linalg.norm(
-            (
-                self.agent.finger1_tip.linear_velocity
-                + self.agent.finger2_tip.linear_velocity
-            )
-            / 2,
-            axis=1,
-        )
+        # Handle different obs dictionary structures (ManiSkill wraps extra info in "extra")
+        obs_extra = obs["extra"] if "extra" in obs else obs
+        target_idx = obs_extra["target_obj"] - 1
 
-        slow_zone = torch.clamp(0.08 - min_tcp_to_item_dist, 0.0, 0.08) / 0.08
-        desired_speed = 0.08
-        speed_penalty = (slow_zone * torch.clamp(tcp_velocity - desired_speed, min=0.0,))
-        reward -= 0.5 * speed_penalty
+        target_grasped = torch.stack([obs_extra[f"obj{i+1}_grasped"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
+        target_tcp_dist = torch.stack([obs_extra[f"obj{i+1}_distance_to_gripper"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
+        target_nearest_collision = torch.stack([obs_extra[f"obj{i+1}_nearest_collision"] for i in range(len(self.objects))], dim=1)[batch_idx, target_idx]
 
-        is_grasped = info["is_item_grasped"].float()
-        reward += is_grasped
+        # Penalizes getting dangerously close (< 2.0 integer clearance units) to table or bin
+        collision_safe_margin = 2.0
+        collision_penalty = torch.clamp(collision_safe_margin - target_nearest_collision.float(), min=0.0)
+        reward -= 0.5 * collision_penalty
 
-        stable_grasp = (is_grasped * torch.exp(-5.0 * tcp_velocity))
-        reward += 0.5 * stable_grasp
+        # Continuous reach reward (0 to 1) when not holding target
+        reach_reward = (1.0 - torch.tanh(5.0 * target_tcp_dist)) * (1.0 - target_grasped)
+        reward += 1.0 * reach_reward
 
-        place_reward = torch.exp(-2 * info["distance_to_rest_qpos"])
-        reward += place_reward * info["is_item_grasped"]
+        # High discrete reward for active target grasp
+        reward += 2.5 * target_grasped
 
-        action_diff = torch.linalg.norm(action, axis=1)
-        smoothness_penalty = action_diff * (1.0 - approach_weight)
-        lift_phase_penalty = is_grasped * torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2, axis=1)
+        # Distance from target object to desired drop location
+        target_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1) 
+        target_pos = target_obj_positions[batch_idx, target_idx]
+        drop_dist = torch.linalg.norm(target_pos - DROP_LOCATION, dim=-1)
 
-        reward -= 0.1 * smoothness_penalty
-        reward -= 0.05 * lift_phase_penalty
+        # Continuous placement reward (strongest when grasped and moved toward target area)
+        placement_reward = (1.0 - torch.tanh(3.0 * drop_dist)) * target_grasped
+        reward += 4.0 * placement_reward
 
-        reward -= 3.0 * info["robot_touching_mat"].float()
-        reward -= 1.0 * (~info["item_lifted"]).float()
+        # Bonus for dropping/releasing target within drop zone threshold (< 0.05m)
+        in_drop_zone = (drop_dist < 0.05).float()
+        successful_placement = in_drop_zone * (1.0 - target_grasped)
+        reward += 10.0 * successful_placement
 
-        if "success" in info:
-            reward[info["success"]] += 15.0
+        # 5. Success Bonus
+        reward[info["success"]] += 15.0
 
         return reward
 
-    def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        return self.compute_dense_reward(obs=obs, action=action, info=info) / 18.0
+    def compute_normalized_dense_reward(self, obs: Any, action: Any, info: dict):
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 32.5

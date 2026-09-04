@@ -260,13 +260,13 @@ class Separate(DefaultCameraEnv):
         )
 
         bin_path = "/home/aboardman/squint2/deploy_utils/blender_objs/bin_2.obj"
-        bin_q = euler2quat(np.pi / 2, 0.0, np.pi / 2)
+        bin_q = euler2quat(0, np.pi/2, 0.0)
         bin_steel_material = sapien.render.RenderMaterial(base_color=[1, 1, 1, 1.0], roughness=0.15, metallic=0.5)
         physx_material = sapien.physx.PhysxMaterial(static_friction=0.6, dynamic_friction=0.5, restitution=0.1)
         builder = self.scene.create_actor_builder()
         builder.add_visual_from_file(filename=bin_path, material=bin_steel_material)
         builder.add_multiple_convex_collisions_from_file(filename=bin_path, decomposition="coacd", material=physx_material)
-        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
+        builder.initial_pose = sapien.Pose(p=[0.0, 0.0, float(self.block_half_size[2]) - 0.05], q=list(bin_q))
         self.bin = builder.build_kinematic("bin")
 
         table_mat_color = (
@@ -295,24 +295,24 @@ class Separate(DefaultCameraEnv):
         self.obj_1 = self._build_instrument(
             inst1_path,
             name="forceps_1",
-            initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[-0.1, -0.05, 0.1], q=[1, 1, 0, 0]),
         )
         self.obj_2 = self._build_instrument(
             inst1_path,
             name="forceps_2",
-            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[0.1, -0.05, 0.1], q=[1, 1, 0, 0]),
         )
 
         inst2_path = "/home/aboardman/squint2/deploy_utils/blender_objs/allis.obj"
         self.obj_3 = self._build_instrument(
             inst2_path,
             name="allis_1",
-            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[-0.1, 0.05, 0.1], q=[1, 1, 0, 0]),
         )
         self.obj_4 = self._build_instrument(
             inst2_path,
             name="allis_2",
-            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1], q=[1, 0, 0, 0]),
+            initial_pose=sapien.Pose(p=[0.1, 0.05, 0.1], q=[1, 1, 0, 0]),
         )
 
         self.objects = [self.obj_1, self.obj_2, self.obj_3, self.obj_4]
@@ -364,10 +364,10 @@ class Separate(DefaultCameraEnv):
             center = center[env_idx]
             bin_pos = center.clone()
             bin_pos[:, 2] = float(self.block_half_size[2]) - 0.03
-            bin_q = euler2quat(np.pi / 2, 0.0, 0.0)
+            bin_q = euler2quat(np.pi / 2, 0.0, np.pi/2)
             q_tensor = torch.tensor(bin_q, device=self.device, dtype=bin_pos.dtype)
             q_tensor = q_tensor.unsqueeze(0).repeat(b, 1)
-            bin_pose = Pose.create_from_pq(p=bin_pos, q=q_tensor)
+            bin_pose = sapien.Pose(p=[0.3, 0.0, float(self.block_half_size[2]) - 0.03], q=list(bin_q))
             self.bin.set_pose(bin_pose)
 
             spawn_base = bin_pos.clone() #spawn_base = center[env_idx]
