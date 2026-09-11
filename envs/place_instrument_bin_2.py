@@ -24,7 +24,7 @@ class SeparateRandomizationConfig(DefaultRandomizationConfig):
     randomize_item_color: bool = False
 
 
-@register_env("PlaceInstruments-v2", max_episode_steps=100)
+@register_env("PlaceInstruments-v2", max_episode_steps=50)
 class Separate(DefaultCameraEnv):
     SUPPORTED_ROBOTS = ["so101", "panda", "fetch"]
     SUPPORTED_OBS_MODES = [
@@ -133,7 +133,6 @@ class Separate(DefaultCameraEnv):
         if not vertices:
             return np.zeros(3, dtype=np.float32)
         return np.mean(np.stack(vertices, axis=0), axis=0)
-
 
     def _build_instrument(self, obj_path: str, name: str, initial_pose: sapien.Pose): #, density: Union[float, np.ndarray, list] = 1000.0):
         # Use color from env_cal if available, otherwise default steel color
@@ -387,16 +386,19 @@ class Separate(DefaultCameraEnv):
             drop_q = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(b, 1)
             self.drop_zone_visual.set_pose(Pose.create_from_pq(p=drop_pos, q=drop_q))
 
+    def _get_instrument_drop_zone_state(self):
+        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
+        drop_xy = torch.tensor(self.DROP_LOCATION[:2], device=self.device, dtype=torch.float32)
+        table_z = (self.table_mat.pose.p[..., 2] + float(self.table_mat_half_size[2]))
+        inst_in_drop_xy = ((torch.abs(all_obj_positions[..., 0] - drop_xy[0]) <= self.DROP_ZONE_WIDTH) & (torch.abs(all_obj_positions[..., 1] - drop_xy[1]) <= self.DROP_ZONE_HEIGHT))
+        inst_near_table = (torch.abs(all_obj_positions[..., 2] - table_z.unsqueeze(1)) <= 0.02)
+        instrument_in_drop_zone = (inst_in_drop_xy & inst_near_table).any(dim=1)
+        return instrument_in_drop_zone
+
     def _get_obs_agent(self):
         qpos = self.agent.robot.get_qpos()
-        if (
-            self.domain_randomization
-            and self.domain_randomization_config.robot_qpos_noise_std > 0
-        ):
-            noise = (
-                torch.randn_like(qpos)
-                * self.domain_randomization_config.robot_qpos_noise_std
-            )
+        if (self.domain_randomization and self.domain_randomization_config.robot_qpos_noise_std > 0):
+            noise = (torch.randn_like(qpos) * self.domain_randomization_config.robot_qpos_noise_std)
             qpos = qpos + noise
         obs = dict(noisy_qpos=qpos)
         controller_state = self.agent.controller.get_state()
@@ -420,6 +422,16 @@ class Separate(DefaultCameraEnv):
         
         tcp_velocity = (self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2
 
+        drop_xy = torch.tensor(self.DROP_LOCATION[:2], device=self.device, dtype=torch.float32)
+        dist_to_drop_xy = torch.linalg.norm(closest_obj_pos[..., :2] - drop_xy, dim=-1)
+        table_z = self.table_mat.pose.p[..., 2] + float(self.table_mat_half_size[2])
+        inst_in_drop_xy = ((torch.abs(closest_obj_pos[..., 0] - drop_xy[0]) <= self.DROP_ZONE_WIDTH) & (torch.abs(closest_obj_pos[..., 1] - drop_xy[1]) <= self.DROP_ZONE_HEIGHT))
+        # Instrument within 2cm of table surface in Z
+        inst_near_table = torch.abs(closest_obj_pos[..., 2] - table_z) <= 0.02
+        # True if AT LEAST ONE instrument is inside the drop zone and on the table
+        instrument_in_drop_zone = self._get_instrument_drop_zone_state()
+
+
         obs.update(
             tcp_pose=self.agent.tcp_pose.raw_pose,
             target_item_pose=closest_obj_pos,
@@ -428,7 +440,12 @@ class Separate(DefaultCameraEnv):
             tcp_velocity=tcp_velocity,
             is_item_grasped=info.get("is_item_grasped", torch.stack([self.agent.is_grasping(obj) for obj in self.objects], dim=1).any(dim=1)),
             robot_touching_mat=self.agent.is_touching(self.table_mat).float(),
-            dist_to_rest_qpos=self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1],
+            robot_touching_bin = self.agent.is_touching(self.bin).float(),
+            dist_to_rest_qpos = torch.linalg.norm(self.agent.controller._target_qpos[:, :-1] - self.rest_qpos[:-1], dim=-1),            
+            instrument_in_drop_zone=instrument_in_drop_zone,
+            dist_to_drop_xy=dist_to_drop_xy,
+            inst_in_drop_xy=inst_in_drop_xy,
+            inst_near_table=inst_near_table,
         )
 
         if self.domain_randomization:
@@ -444,14 +461,15 @@ class Separate(DefaultCameraEnv):
         return obs
 
     def evaluate(self):
-        # 1. Distances and reaching logic
-        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)  # Shape: (num_envs, 4, 3)
+        # Calculate distance to all objects and take the minimum across items
+        all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
         tcp_pos_expanded = self.agent.tcp_pos.unsqueeze(1)
         dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
         min_dist_to_item, _ = torch.min(dists_to_items, dim=1)
+        
         reached_object = min_dist_to_item < 0.03
 
-        # 2. Check grasping and lifting status across all instruments
+        # Check if ANY instrument is currently grasped or lifted
         is_item_grasped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         item_lifted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
@@ -459,78 +477,68 @@ class Separate(DefaultCameraEnv):
             is_item_grasped = is_item_grasped | self.agent.is_grasping(obj)
             item_lifted = item_lifted | (obj.pose.p[..., -1] >= 0.04)
 
-        # 3. Distance to rest qpos
         target_qpos = self.agent.controller._target_qpos.clone()
         distance_to_rest_qpos = torch.linalg.norm(
             target_qpos[:, :-1] - self.rest_qpos[:-1], axis=-1
         )
-
-        # 4. Drop Zone evaluation
-        drop_xy = torch.tensor(self.DROP_LOCATION[:2], device=self.device, dtype=torch.float32)
-        # Shape: (num_envs, 1) for proper broadcasting against (num_envs, 4)
-        table_z = (self.table_mat.pose.p[..., 2] + float(self.table_mat_half_size[2])).unsqueeze(-1)
-
-        # Instrument inside XY boundaries: Shape (num_envs, 4)
-        inst_in_drop_xy = (
-            (torch.abs(all_obj_positions[..., 0] - drop_xy[0]) <= self.DROP_ZONE_WIDTH) &
-            (torch.abs(all_obj_positions[..., 1] - drop_xy[1]) <= self.DROP_ZONE_HEIGHT)
-        )
-        # Instrument within 2cm of table surface: Shape (num_envs, 4)
-        inst_near_table = torch.abs(all_obj_positions[..., 2] - table_z) <= 0.02
-
-        # True if AT LEAST ONE instrument is inside the drop zone and near the table surface
-        instrument_in_drop_zone = (inst_in_drop_xy & inst_near_table).any(dim=1)
+        reached_rest_qpos = distance_to_rest_qpos < 0.2
 
         robot_touching_mat = self.agent.is_touching(self.table_mat)
+        robot_touching_bin = self.agent.is_touching(self.bin).float()
+        instrument_in_drop_zone = self._get_instrument_drop_zone_state()
 
-        # Success condition: At least one instrument successfully placed in the drop zone
-        success = instrument_in_drop_zone
+        success = instrument_in_drop_zone & ~is_item_grasped
 
         return {
             "is_item_grasped": is_item_grasped,
             "reached_object": reached_object,
             "distance_to_rest_qpos": distance_to_rest_qpos,
             "robot_touching_mat": robot_touching_mat,
+            "robot_touching_bin": robot_touching_bin,
             "item_lifted": item_lifted,
-            "instrument_in_drop_zone": instrument_in_drop_zone,
             "success": success,
         }
 
     def compute_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
-        # Determine closest instrument for reaching/grasping phase
+        # Compute distance to closest instrument
         all_obj_positions = torch.stack([obj.pose.p for obj in self.objects], dim=1)
         tcp_pos_expanded = self.agent.tcp_pose.p.unsqueeze(1)
         dists_to_items = torch.linalg.norm(all_obj_positions - tcp_pos_expanded, dim=-1)
-        min_tcp_to_item_dist, min_item_idx = torch.min(dists_to_items, dim=1)
+        min_tcp_to_item_dist, _ = torch.min(dists_to_items, dim=1)
+        
+        is_grasped = info["is_item_grasped"].float()
+        dist_to_drop_xy = obs["extra"]["dist_to_drop_xy"]
+        inst_in_drop_xy = obs["extra"]["inst_in_drop_xy"]
+        inst_near_table = obs["extra"]["inst_near_table"]        
+        instrument_in_drop_zone = self._get_instrument_drop_zone_state()
+        gripper_qpos = self.agent.robot.get_qpos()[:, -1]
 
-        # Active item tracking
-        env_indices = torch.arange(self.num_envs, device=self.device)
-        active_obj_pos = all_obj_positions[env_indices, min_item_idx]
-
-        # ==================== LIFT LOGIC ====================
-        reaching_reward = 1.0 - torch.tanh(5.0 * min_tcp_to_item_dist)
+        reaching_reward = (1.0 - torch.tanh(5.0 * min_tcp_to_item_dist))*(~info["is_item_grasped"])*(~instrument_in_drop_zone)
         reward = reaching_reward.clone()
 
         approach_weight = torch.clamp(min_tcp_to_item_dist / 0.15, 0.0, 1.0)
-        tcp_velocity = torch.linalg.norm(
-            (
-                self.agent.finger1_tip.linear_velocity
-                + self.agent.finger2_tip.linear_velocity
-            )
-            / 2,
-            axis=1,
-        )
+        tcp_velocity = torch.linalg.norm((self.agent.finger1_tip.linear_velocity + self.agent.finger2_tip.linear_velocity) / 2, axis=1)
 
         slow_zone = torch.clamp(0.08 - min_tcp_to_item_dist, 0.0, 0.08) / 0.08
         desired_speed = 0.08
         speed_penalty = (slow_zone * torch.clamp(tcp_velocity - desired_speed, min=0.0,))
         reward -= 0.5 * speed_penalty
 
-        is_grasped = info["is_item_grasped"].float()
         reward += is_grasped
-
         stable_grasp = (is_grasped * torch.exp(-5.0 * tcp_velocity))
         reward += 0.5 * stable_grasp
+
+        lift_reached_mask = (info["is_item_grasped"].float() * (1 / (info["distance_to_rest_qpos"] + 1e-8))) > 100
+
+        lift_reached_reward = torch.exp(-2 * info["distance_to_rest_qpos"]) * info["is_item_grasped"].float()
+        reward_not_lifted = lift_reached_reward - 1.0 * (~info["item_lifted"]).float() 
+
+        placing_reward = info["item_lifted"].float() * -dist_to_drop_xy
+        drop_reward = inst_near_table.float() * inst_in_drop_xy.float() * torch.clamp(gripper_qpos / 0.04, 0.0, 1.0)
+        drop_complete_reward = instrument_in_drop_zone.float()
+        reward_lifted = placing_reward + drop_reward + drop_complete_reward
+
+        reward += torch.where(lift_reached_mask, reward_lifted, reward_not_lifted)
 
         action_diff = torch.linalg.norm(action, axis=1)
         smoothness_penalty = action_diff * (1.0 - approach_weight)
@@ -540,48 +548,12 @@ class Separate(DefaultCameraEnv):
         reward -= 0.05 * lift_phase_penalty
 
         reward -= 3.0 * info["robot_touching_mat"].float()
-        reward -= 1.0 * (~info["item_lifted"]).float()
-        # ==============================================================
-
-        # ==================== PLACE LOGIC (GATED) ====================
-        lift_completed = info["item_lifted"] & info["is_item_grasped"]
-        lift_completed_mask = lift_completed.float()
-
-        drop_xy = torch.tensor(self.DROP_LOCATION[:2], device=self.device, dtype=torch.float32)
-        # Single Z calculation per env for active object
-        table_z = self.table_mat.pose.p[..., 2] + float(self.table_mat_half_size[2])
-
-        # Stage A: XY Alignment Reward
-        inst_xy_dist = torch.linalg.norm(active_obj_pos[:, :2] - drop_xy, dim=-1)
-        xy_reach_reward = 1.0 - torch.tanh(3.0 * inst_xy_dist)
-        
-        # Check if instrument is inside XY Drop Zone bounds
-        in_xy_drop_zone = (
-            (torch.abs(active_obj_pos[:, 0] - drop_xy[0]) <= self.DROP_ZONE_WIDTH) &
-            (torch.abs(active_obj_pos[:, 1] - drop_xy[1]) <= self.DROP_ZONE_HEIGHT)
-        )
-
-        # Stage B: Minimize Z-distance once in XY drop zone
-        inst_z_dist = torch.abs(active_obj_pos[:, 2] - table_z)
-        z_minimize_reward = 1.0 - torch.tanh(10.0 * inst_z_dist)
-
-        # Stage C: Gripper Opening Reward when <= 2cm from table
-        near_table_surface = inst_z_dist <= 0.02
-        gripper_qpos = self.agent.robot.get_qpos()[:, -1]
-        gripper_open_reward = torch.clamp(gripper_qpos / 0.04, 0.0, 1.0)
-
-        # Cumulative Place Reward formulation
-        place_reward = 2.0 + 3.0 * xy_reach_reward
-        place_reward += in_xy_drop_zone.float() * (3.0 + 4.0 * z_minimize_reward)
-        place_reward += (in_xy_drop_zone & near_table_surface).float() * (5.0 + 3.0 * gripper_open_reward)
-
-        # Activate Place Reward ONLY when lift is completed
-        reward += lift_completed_mask * place_reward
-
-        # Penalty for robot touching blue mat
-        reward -= 2.0 * info["robot_touching_mat"].float()
+        reward -= 3.0 * info["robot_touching_bin"].float()
 
         if "success" in info:
             reward[info["success"]] += 15.0
 
         return reward
+
+    def compute_normalized_dense_reward(self, obs: Any, action: torch.Tensor, info: dict):
+        return self.compute_dense_reward(obs=obs, action=action, info=info) / 18.0
