@@ -15,3 +15,6 @@ import envs.lift_instruments_3
 import envs.lift2separate_instruments_1
 import envs.lift2separate_instruments_2
 import envs.lift2_separate_instruments_bin_3
+import envs.place_instrument_bin_1
+import envs.place_instrument_bin_2
+import envs.place_instrument_bin_3
