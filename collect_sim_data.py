@@ -17,10 +17,10 @@ import gymnasium as gym
 ENV_ID = "SO101LiftCube-v1"
 
 # Trained Squint checkpoint
-CHECKPOINT = "runs/Lift_cube/ckpt.pt"
+CHECKPOINT = "squint2/runs/Lift_cube/ckpt.pt"
 
 # Number of SUCCESSFUL episodes to collect
-NUM_SUCCESSFUL_EPISODES = 500
+NUM_SUCCESSFUL_EPISODES = 5
 
 MAX_STEPS = 60
 
@@ -93,7 +93,7 @@ SO101_EE_NAMES = [
 # Because the real and simulation URDFs you supplied have the
 # same kinematic chain and gripper_frame_link, this gives us
 # a common coordinate convention.
-LEROBOT_URDF_PATH = "SO101/so101_new_calib.urdf"
+LEROBOT_URDF_PATH = "lerobot/SO101/so101_new_calib.urdf"
 
 # Squint policy input size -- DO NOT change unless the policy was
 # trained with a different size.
