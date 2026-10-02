@@ -579,7 +579,7 @@ if __name__ == "__main__":
                       sensor_configs=dict(width=args.render_size, height=args.render_size))
     eval_env_kwargs = dict(obs_mode=args.obs_mode, render_mode=args.render_mode, sim_backend="gpu",
                            sensor_configs=dict(width=args.render_size, height=args.render_size),
-                           human_render_camera_configs=dict(shader_pack="default", width=args.render_size, height=args.render_size))
+                           human_render_camera_configs=dict(shader_pack="minimal", width=args.render_size, height=args.render_size))
     if args.control_mode is not None:
         env_kwargs["control_mode"] = args.control_mode
         eval_env_kwargs["control_mode"] = args.control_mode
